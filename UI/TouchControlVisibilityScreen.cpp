@@ -74,14 +74,15 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 	auto di = GetI18NCategory(I18NCat::DIALOG);
 	auto co = GetI18NCategory(I18NCat::CONTROLS);
 
+	// Temporarily hide the drum to prevent it from blocking the UI
+	TouchControlConfig &touch = g_Config.GetTouchControlsConfig(GetDeviceOrientation());
+
 	const bool portrait = GetDeviceOrientation() == DeviceOrientation::Portrait;
 
 	const int cellSize = portrait ? std::min((g_display.dp_xres / 2 - 10), 290) : 380;
 	UI::GridLayoutSettings gridsettings(cellSize, 64, 5);
 	gridsettings.fillCells = true;
 	GridLayout *grid = parent->Add(new GridLayoutList(gridsettings, new LayoutParams(FILL_PARENT, WRAP_CONTENT)));
-
-	TouchControlConfig &touch = g_Config.GetTouchControlsConfig(GetDeviceOrientation());
 
 	toggles_.clear();
 	toggles_.push_back({ "Circle", &touch.bShowTouchCircle, ImageID("I_CIRCLE"), nullptr });
@@ -99,6 +100,7 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 	}});
 	toggles_.push_back({ "Fast-forward", &touch.touchFastForwardKey.show, ImageID::invalid(), nullptr});
 	toggles_.push_back({ "Pause", &touch.touchPauseKey.show, ImageID("I_HAMBURGER"), nullptr});
+	toggles_.push_back({ "Taiko Drum", &touch.touchTatacon.show, ImageID::invalid(), nullptr});
 
 	for (int i = 0; i < TouchControlConfig::CUSTOM_BUTTON_COUNT; i++) {
 		char temp[256];
@@ -147,7 +149,7 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 }
 
 void TouchControlVisibilityScreen::onFinish(DialogResult result) {
-	g_Config.Save("TouchControlVisibilityScreen::onFinish");
+    g_Config.Save("TouchControlVisibilityScreen::onFinish");
 }
 
 std::string_view RightAnalogMappingScreen::GetTitle() const {

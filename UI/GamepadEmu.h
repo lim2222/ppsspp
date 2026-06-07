@@ -428,3 +428,4 @@ void GamepadTouch();
 void GamepadResetTouch();
 void GamepadUpdateOpacity(float force = -1.0f);
 float GamepadGetOpacity();
+bool IsPointerUsed(int id);
