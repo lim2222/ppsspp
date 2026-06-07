@@ -1,4 +1,4 @@
-package org.ppsspp.ppsspp;
+package org.ppsspp.taiko;
 
 // Touch-enabled SurfaceView.
 // Supports simple multitouch and pressure.

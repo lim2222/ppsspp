@@ -188,8 +188,8 @@ android {
 	}
 	productFlavors {
 		create("normal") {
-			isDefault = true
-			applicationId = "org.ppsspp.ppsspp"
+        isDefault = true
+        applicationId = "org.ppsspp.ppsspp.taiko"
 			dimension = "variant"
 			externalNativeBuild {
 				cmake {
