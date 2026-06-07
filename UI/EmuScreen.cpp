@@ -100,7 +100,6 @@ using namespace std::placeholders;
 #include "ext/imgui/imgui_impl_thin3d.h"
 #include "ext/imgui/imgui_impl_platform.h"
 
-
 #if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
 #include "Windows/MainWindow.h"
 #endif

@@ -1,4 +1,4 @@
-package org.ppsspp.ppsspp;
+package org.ppsspp.taiko;
 
 import android.content.pm.ActivityInfo;
 import android.graphics.Point;

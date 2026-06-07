@@ -896,6 +896,7 @@ void TouchControlConfig::ResetLayout() {
 	reset(&touchFastForwardKey);
 	reset(&touchLKey);
 	reset(&touchRKey);
+	reset(&touchTatacon);
 	reset(&touchAnalogStick);
 	reset(&touchRightAnalogStick);
 	reset(&touchPauseKey);
@@ -965,6 +966,7 @@ static const ConfigSetting touchControlSettings[] = {
 	ConfigSetting("UnthrottleKeyX", "UnthrottleKeyY", "UnthrottleKeyScale", "ShowTouchUnthrottle", SETTING(g_Config.touchControlsLandscape, touchFastForwardKey), defaultTouchPosShow, CfgFlag::PER_GAME),
 	ConfigSetting("LKeyX", "LKeyY", "LKeyScale", "ShowTouchLTrigger", SETTING(g_Config.touchControlsLandscape, touchLKey), defaultTouchPosShow, CfgFlag::PER_GAME),
 	ConfigSetting("RKeyX", "RKeyY", "RKeyScale", "ShowTouchRTrigger", SETTING(g_Config.touchControlsLandscape, touchRKey), defaultTouchPosShow, CfgFlag::PER_GAME),
+	ConfigSetting("TataconX", "TataconY", "TataconScale", "ShowTouchTatacon", SETTING(g_Config.touchControlsLandscape, touchTatacon), defaultTouchPosHide, CfgFlag::PER_GAME),
 	ConfigSetting("PauseKeyX", "PauseKeyY", "PauseKeyScale", "ShowTouchPause", SETTING(g_Config.touchControlsLandscape, touchPauseKey), defaultTouchPosShow, CfgFlag::PER_GAME),
 	ConfigSetting("AnalogStickX", "AnalogStickY", "AnalogStickScale", "ShowAnalogStick", SETTING(g_Config.touchControlsLandscape, touchAnalogStick), defaultTouchPosShow, CfgFlag::PER_GAME),
 	ConfigSetting("RightAnalogStickX", "RightAnalogStickY", "RightAnalogStickScale", "ShowRightAnalogStick", SETTING(g_Config.touchControlsLandscape, touchRightAnalogStick), defaultTouchPosHide, CfgFlag::PER_GAME),

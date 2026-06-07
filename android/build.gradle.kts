@@ -1,7 +1,3 @@
-import com.google.protobuf.gradle.*
-import org.gradle.process.ExecOperations
-import java.io.ByteArrayOutputStream
-
 plugins {
 	id("com.android.application")
 	id("com.google.protobuf")
@@ -191,7 +187,7 @@ android {
 	}
 	productFlavors {
 		create("normal") {
-			applicationId = "org.ppsspp.ppsspp"
+			applicationId = "org.ppsspp.ppsspp.taiko"
 			dimension = "variant"
 			externalNativeBuild {
 				cmake {

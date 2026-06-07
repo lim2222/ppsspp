@@ -236,6 +236,29 @@ private:
 	float &spacing_;
 };
 
+class TataconDragDrop : public DragDropButton {
+public:
+	TataconDragDrop(ConfigTouchPos &pos, const Bounds &screenBounds)
+		: DragDropButton(pos, "Taiko drum", ImageID::invalid(), ImageID::invalid(), screenBounds) {
+	}
+
+	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override {
+		const AtlasImage *image = dc.Draw()->GetAtlas()->getImage(ImageID("I_TATACON"));
+		if (image) {
+			w = image->w * theScale_;
+			h = image->h * theScale_;
+		} else {
+			w = 0.0f;
+			h = 0.0f;
+		}
+	}
+
+	void Draw(UIContext &dc) override {
+		const float opacity = g_Config.iTouchButtonOpacity / 100.0f;
+		dc.Draw()->DrawImage(ImageID("I_TATACON"), bounds_.centerX(), bounds_.centerY(), theScale_ * layoutAreaScale, colorAlpha(0xFFFFFF, opacity), ALIGN_CENTER);
+	}
+};
+
 class PSPDPadButtons : public DragDropButton {
 public:
 	PSPDPadButtons(ConfigTouchPos &pos, const char *key, float &spacing, const Bounds &screenBounds)
@@ -393,8 +416,15 @@ bool ControlLayoutView::Touch(const TouchInput &touch) {
 			// Allow placing the control halfway outside the play area.
 			Bounds validRange = this->GetBounds();
 			// Control coordinates are relative inside the bounds.
-			validRange.x = 0.0f;
-			validRange.y = 0.0f;
+                        TataconDragDrop *isTatacon = dynamic_cast<TataconDragDrop *>(pickedControl_);
+                        if (isTatacon) {
+                            float w = validRange.w;
+                            validRange.x = -w;        // 允许往左超出一个屏幕宽度
+                            validRange.w = w * 3.0f;  // 保持右边界不变
+                        } else {
+                            validRange.x = 0.0f;
+                        }
+                        validRange.y = 0.0f;
 
 			// TODO: Worth keeping?
 			// This make sure the control is all inside the screen (commented out only half)
@@ -521,6 +551,9 @@ void ControlLayoutView::CreateViews() {
 	}
 	if (touch.touchRightAnalogStick.show) {
 		controls_.push_back(new PSPStickDragDrop(touch.touchRightAnalogStick, "Right analog stick", stickBg, stickImage, bounds, touch.fRightStickHeadScale));
+	}
+	if (touch.touchTatacon.show) {
+		controls_.push_back(new TataconDragDrop(touch.touchTatacon, bounds));
 	}
 
 	auto addDragCustomKey = [&](ConfigTouchPos &pos, const char *key, const ConfigCustomButton& cfg) {

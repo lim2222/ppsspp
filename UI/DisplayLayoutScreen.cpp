@@ -146,7 +146,8 @@ void DisplayLayoutScreen::DrawBackground(UIContext &dc) {
 }
 
 void DisplayLayoutScreen::onFinish(DialogResult reason) {
-	g_Config.Save("DisplayLayoutScreen::onFinish");
+    g_Config.Save("DisplayLayoutScreen::onFinish");
+    System_PostUIMessage(UIMessage::CONFIG_LOADED, "");
 }
 
 void DisplayLayoutScreen::dialogFinished(const Screen *dialog, DialogResult result) {
