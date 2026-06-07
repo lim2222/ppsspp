@@ -24,7 +24,7 @@
 #include "Common/Render/TextureAtlas.h"
 #include "Common/Math/math_util.h"
 #include "Common/UI/Context.h"
-
+#include "Common/UI/Screen.h"
 #include "Common/Log.h"
 #include "Common/TimeUtil.h"
 #include "Core/Config.h"
@@ -33,7 +33,9 @@
 #include "Core/HLE/sceCtrl.h"
 #include "Core/ControlMapper.h"
 #include "UI/GamepadEmu.h"
+#include "UI/TataconControl.h"
 
+extern ScreenManager *g_screenManager;
 const float TOUCH_SCALE_FACTOR = 1.5f;
 
 static uint32_t usedPointerMask = 0;
@@ -41,6 +43,10 @@ static uint32_t analogPointerMask = 0;
 
 static float g_gamepadOpacity;
 static double g_lastTouch;
+
+bool IsPointerUsed(int id) {
+    return (usedPointerMask & (1 << id)) != 0;
+}
 
 MultiTouchButton *primaryButton[TOUCH_MAX_POINTERS]{};
 std::set<int> g_activeGesturePointers;
@@ -945,6 +951,10 @@ void InitPadLayout(TouchControlConfig *config, DeviceOrientation orientation, fl
 	int r_key_Y = l_key_Y;
 	initTouchPos(&config->touchRKey, r_key_X, r_key_Y);
 
+	int tatacon_X = halfW;
+	int tatacon_Y = portrait ? screenBottom - 260 * scale : screenBottom - 170 * scale;
+	initTouchPos(&config->touchTatacon, tatacon_X, tatacon_Y, portrait ? 1.5f : 1.8f);
+
 	struct { float x; float y; } customButtonPositions[10] = {
 		{ 1.2f, 0.5f },
 		{ 2.2f, 0.5f },
@@ -1085,32 +1095,36 @@ GamepadEmuView::GamepadEmuView(const TouchControlConfig &config, float xres, flo
 			Add(new PSPStick(stickBg, "Right analog stick", stickImage, ImageID("I_STICK"), 1, config.touchRightAnalogStick.scale, buttonLayoutParams(config.touchRightAnalogStick)));
 	}
 
-	// Sanitize custom button images, while adding them.
-	for (int i = 0; i < TouchControlConfig::CUSTOM_BUTTON_COUNT; i++) {
-		if (g_Config.CustomButton[i].shape >= ARRAY_SIZE(CustomKeyData::customKeyShapes)) {
-			g_Config.CustomButton[i].shape = 0;
-		}
-		if (g_Config.CustomButton[i].image >= ARRAY_SIZE(CustomKeyData::customKeyImages)) {
-			g_Config.CustomButton[i].image = 0;
-		}
-
-		char temp[64];
-		snprintf(temp, sizeof(temp), "Custom %d button", i + 1);
-		addCustomButton(g_Config.CustomButton[i], temp, config.touchCustom[i]);
-	}
-
-	// Add the two gesture zones.
-	for (int i = 0; i < 2; i++) {
-		if (g_Config.gestureControls[i].bGestureControlEnabled || g_Config.gestureControls[i].bAnalogGesture) {
-			// We have them both cover the whole surface, then limit in the touch handler.
-			// This is because there's no easy way to do "half the screen" in AnchorLayout.
-			// We can do more complex layout combinations, but meh.
-			Add(new GestureGamepad(controlMapper, i, new AnchorLayoutParams(FILL_PARENT, FILL_PARENT, 0.0f, 0.0f, 0.0f, 0.0f)));
-		}
-	}
+        // Sanitize custom button images, while adding them.
+        for (int i = 0; i < TouchControlConfig::CUSTOM_BUTTON_COUNT; i++) {
+                if (g_Config.CustomButton[i].shape >= ARRAY_SIZE(CustomKeyData::customKeyShapes)) {
+                        g_Config.CustomButton[i].shape = 0;
+                }
+                if (g_Config.CustomButton[i].image >= ARRAY_SIZE(CustomKeyData::customKeyImages)) {
+                        g_Config.CustomButton[i].image = 0;
+                }
+                char temp[64];
+                snprintf(temp, sizeof(temp), "Custom %d button", i + 1);
+                addCustomButton(g_Config.CustomButton[i], temp, config.touchCustom[i]);
+        }
+        // Add the two gesture zones.
+        for (int i = 0; i < 2; i++) {
+                if (g_Config.gestureControls[i].bGestureControlEnabled || g_Config.gestureControls[i].bAnalogGesture) {
+                        Add(new GestureGamepad(controlMapper, i, new AnchorLayoutParams(FILL_PARENT, FILL_PARENT, 0.0f, 0.0f, 0.0f, 0.0f)));
+                }
+        }
+        // Tatacon last so usedPointerMask is set by other buttons first
+        if (config.touchTatacon.show) {
+                Add(new TataconControl(config.touchTatacon.scale, buttonLayoutParams(config.touchTatacon)));
+        }
 }
 
 void GamepadEmuView::Update() {
+	// Skip gamepad controls update/draw when TouchControlVisibilityScreen is on top to prevent blocking
+	if (g_screenManager && g_screenManager->topScreen() && strcmp(g_screenManager->topScreen()->tag(), "TouchControlVisibility") == 0) {
+		return;
+	}
+
 	AnchorLayout::Update();
 	GamepadUpdateOpacity();
 
