@@ -1,4 +1,4 @@
-package org.ppsspp.taiko;
+package org.ppsspp.ppsspp;
 
 // Note that the display* methods are in NativeRenderer.java
 

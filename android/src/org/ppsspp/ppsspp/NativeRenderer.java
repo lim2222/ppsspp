@@ -1,4 +1,4 @@
-package org.ppsspp.taiko;
+package org.ppsspp.ppsspp;
 
 import android.opengl.GLSurfaceView;
 import android.util.Log;

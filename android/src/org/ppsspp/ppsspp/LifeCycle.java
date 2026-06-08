@@ -1,4 +1,4 @@
-package org.ppsspp.taiko;
+package org.ppsspp.ppsspp;
 
 import androidx.annotation.NonNull;
 import android.util.Log;
