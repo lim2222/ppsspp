@@ -1,4 +1,4 @@
-package org.ppsspp.taiko;
+package org.ppsspp.ppsspp;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.Keep;
@@ -34,6 +34,7 @@ import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.text.InputType;
 import android.util.Log;
+import android.database.Cursor;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
@@ -61,6 +62,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.documentfile.provider.DocumentFile;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
