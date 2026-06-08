@@ -458,9 +458,9 @@ bool ControlLayoutView::Touch(const TouchInput &touch) {
 			float movementScale = 0.02f;
 			float newScale = startScale_ + diffY * movementScale; 
 			float newSpacing = startSpacing_ + diffX * movementScale;
-			if (newScale > 3.0f) newScale = 3.0f;
+			if (newScale > 5.0f) newScale = 5.0f;
 			if (newScale < 0.5f) newScale = 0.5f;
-			if (newSpacing > 3.0f) newSpacing = 3.0f;
+			if (newSpacing > 4.0f) newSpacing = 4.0f;
 			if (newSpacing < 0.5f) newSpacing = 0.5f;
 			pickedControl_->SetSpacing(newSpacing);
 			pickedControl_->SetScale(newScale);
