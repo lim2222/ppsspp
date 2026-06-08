@@ -433,7 +433,7 @@ static bool GenerateUIAtlasImage(Atlas *atlas, float dpiScale, Image *dest, int 
 			img.resize(16, 16);
 			img.fill(0xFFFFFFFF);
 		} else if (equals(imageIDs[i].id, "I_EMPTY")) {
-			img.resize(16, 16);
+			img.resize(64, 64);
 			img.fill(0);
 		} else {
 			std::string name = "ui_images/";
