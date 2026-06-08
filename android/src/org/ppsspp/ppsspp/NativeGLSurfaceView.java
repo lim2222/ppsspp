@@ -1,4 +1,4 @@
-package org.ppsspp.taiko;
+package org.ppsspp.ppsspp;
 
 // Touch-enabled GLSurfaceView.
 // Used when javaGL = true.
