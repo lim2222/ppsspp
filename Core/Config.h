@@ -140,7 +140,7 @@ struct TouchControlConfig : public ConfigBlock {
 	bool bShowTouchCross = true;
 	bool bShowTouchTriangle = true;
 	bool bShowTouchSquare = true;
-
+	int iTouchButtonOpacity = 65;
 	void ResetLayout();
 
 	bool CanResetToDefault() const override { return true; }
