@@ -64,7 +64,9 @@ void GamepadUpdateOpacity(float force) {
 
 	float fadeAfterSeconds = g_Config.iTouchButtonHideSeconds;
 	float fadeTransitionSeconds = std::min(fadeAfterSeconds, 0.5f);
-	float opacity = g_Config.iTouchButtonOpacity / 100.0f;
+	const TouchControlConfig &touch = g_Config.GetTouchControlsConfig(g_display.GetDeviceOrientation());
+	float opacity = touch.iTouchButtonOpacity / 100.0f;
+
 
 	float multiplier = 1.0f;
 	float secondsWithoutTouch = time_now_d() - g_lastTouch;
@@ -1273,7 +1275,8 @@ bool GestureGamepad::Touch(const TouchInput &input) {
 }
 
 void GestureGamepad::Draw(UIContext &dc) {
-	float opacity = g_Config.iTouchButtonOpacity / 100.0;
+	const TouchControlConfig &touchCfg = g_Config.GetTouchControlsConfig(g_display.GetDeviceOrientation());
+	float opacity = touchCfg.iTouchButtonOpacity / 100.0;
 	if (opacity <= 0.0f)
 		return;
 

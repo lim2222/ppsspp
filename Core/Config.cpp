@@ -940,7 +940,7 @@ static const ConfigSetting touchControlSettings[] = {
 	ConfigSetting("PauseKeyX", "PauseKeyY", "PauseKeyScale", "ShowTouchPause", SETTING(g_Config.touchControlsLandscape, touchPauseKey), defaultTouchPosShow, CfgFlag::PER_GAME),
 	ConfigSetting("AnalogStickX", "AnalogStickY", "AnalogStickScale", "ShowAnalogStick", SETTING(g_Config.touchControlsLandscape, touchAnalogStick), defaultTouchPosShow, CfgFlag::PER_GAME),
 	ConfigSetting("RightAnalogStickX", "RightAnalogStickY", "RightAnalogStickScale", "ShowRightAnalogStick", SETTING(g_Config.touchControlsLandscape, touchRightAnalogStick), defaultTouchPosHide, CfgFlag::PER_GAME),
-
+	ConfigSetting("TouchButtonOpacity", SETTING(g_Config.touchControlsLandscape, iTouchButtonOpacity), 65, CfgFlag::PER_GAME),
 	ConfigSetting("LeftStickHeadScale", SETTING(g_Config.touchControlsLandscape, fLeftStickHeadScale), CfgFlag::PER_GAME),
 	ConfigSetting("RightStickHeadScale", SETTING(g_Config.touchControlsLandscape, fRightStickHeadScale), CfgFlag::PER_GAME),
 	ConfigSetting("HideStickBackground", SETTING(g_Config.touchControlsLandscape, bHideStickBackground), CfgFlag::PER_GAME),

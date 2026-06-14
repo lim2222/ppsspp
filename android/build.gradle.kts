@@ -148,6 +148,7 @@ android {
 		}
 		getByName("release") {
 			isMinifyEnabled = false
+			signingConfig = signingConfigs.getByName("optimized")
 			if (project.hasProperty("RELEASE_STORE_FILE")) {
 				signingConfig = signingConfigs.getByName("release")
 			} else {
