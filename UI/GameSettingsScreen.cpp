@@ -840,9 +840,14 @@ void GameSettingsScreen::CreateControlsSettings(UI::ViewGroup *controlsSettings)
 		View *style = controlsSettings->Add(new PopupMultiChoice(&g_Config.iTouchButtonStyle, co->T("Button style"), touchControlStyles, 0, ARRAY_SIZE(touchControlStyles), I18NCat::CONTROLS, screenManager()));
 		style->SetEnabledPtr(&g_Config.bShowTouchControls);
 
-		PopupSliderChoice *opacity = controlsSettings->Add(new PopupSliderChoice(&g_Config.iTouchButtonOpacity, 0, 100, 65, co->T("Button Opacity"), screenManager(), "%"));
-		opacity->SetEnabledPtr(&g_Config.bShowTouchControls);
-		opacity->SetFormat("%i%%");
+		TouchControlConfig &landscape = g_Config.touchControlsLandscape;
+		TouchControlConfig &portrait = g_Config.touchControlsPortrait;
+		auto *opacityLandscape = controlsSettings->Add(new PopupSliderChoice(&landscape.iTouchButtonOpacity, 0, 100, 65, co->T("Button Opacity (Landscape)"), screenManager(), "%"));
+		auto *opacityPortrait = controlsSettings->Add(new PopupSliderChoice(&portrait.iTouchButtonOpacity, 0, 100, 65, co->T("Button Opacity (Portrait)"), screenManager(), "%"));
+		opacityLandscape->SetEnabledPtr(&g_Config.bShowTouchControls);
+		opacityPortrait->SetEnabledPtr(&g_Config.bShowTouchControls);
+		opacityLandscape->SetFormat("%i%%");
+		opacityPortrait->SetFormat("%i%%");
 		PopupSliderChoice *autoHide = controlsSettings->Add(new PopupSliderChoice(&g_Config.iTouchButtonHideSeconds, 0, 300, 20, co->T("Auto-hide buttons after delay"), screenManager(), di->T("seconds, 0:off")));
 		autoHide->SetEnabledPtr(&g_Config.bShowTouchControls);
 		autoHide->SetFormat(di->T("%d seconds"));
