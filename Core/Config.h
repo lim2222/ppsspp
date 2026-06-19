@@ -152,6 +152,8 @@ struct TouchControlConfig : public ConfigBlock {
 	bool bRepeatTouchL = false;
 	bool bToggleTouchR = false;
 	bool bRepeatTouchR = false;
+	bool bToggleTouchFastForward = false;
+	bool bRepeatTouchFastForward = false;
 	int iTouchButtonOpacity = 65;
 	void ResetLayout();
 

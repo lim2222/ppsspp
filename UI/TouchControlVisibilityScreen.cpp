@@ -118,7 +118,7 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 	toggles_.push_back({ "Right Analog Stick", &touch.touchRightAnalogStick.show, ImageID::invalid(), [=](EventParams &e) {
 		screenManager()->push(new RightAnalogMappingScreen(gamePath_));
 	}});
-	toggles_.push_back({ "Fast-forward", &touch.touchFastForwardKey.show, ImageID::invalid(), nullptr});
+	toggles_.push_back({ "Fast-forward", &touch.touchFastForwardKey.show, ImageID::invalid(), nullptr, &touch.bToggleTouchFastForward, &touch.bRepeatTouchFastForward});
 	toggles_.push_back({ "Pause", &touch.touchPauseKey.show, ImageID("I_HAMBURGER"), nullptr});
 	toggles_.push_back({ "Taiko Drum", &touch.touchTatacon.show, ImageID::invalid(), nullptr});
 
@@ -161,8 +161,16 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
                 choice = new CheckBoxChoice(toggle.img, checkbox, new LinearLayoutParams(1.0f));
         }
 		} else {
-			choice = new CheckBoxChoice(mc->T(toggle.key), checkbox, new LinearLayoutParams(1.0f));
-		}
+        if (toggle.toggle != nullptr) {
+                choice = new Choice(mc->T(toggle.key), new LinearLayoutParams(1.0f));
+                choice->OnClick.Add([this, toggle](UI::EventParams &e) {
+                        auto mc = GetI18NCategory(I18NCat::MAPPABLECONTROLS);
+                        screenManager()->push(new PSPButtonModePopup(mc->T(toggle.key), toggle.toggle, toggle.repeat));
+                });
+        } else {
+                choice = new CheckBoxChoice(mc->T(toggle.key), checkbox, new LinearLayoutParams(1.0f));
+        }
+}
 
 		// Cannot hide the back button if the system doesn't have a built-in one.
 		if (toggle.key == "Pause" && !System_GetPropertyBool(SYSPROP_HAS_BACK_BUTTON)) {
