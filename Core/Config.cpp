@@ -901,7 +901,19 @@ static const ConfigSetting touchControlSettings[] = {
 	ConfigSetting("ShowTouchCircle", SETTING(g_Config.touchControlsLandscape, bShowTouchCircle), true, CfgFlag::PER_GAME),
 	ConfigSetting("ShowTouchSquare", SETTING(g_Config.touchControlsLandscape, bShowTouchSquare), true, CfgFlag::PER_GAME),
 	ConfigSetting("ShowTouchTriangle", SETTING(g_Config.touchControlsLandscape, bShowTouchTriangle), true, CfgFlag::PER_GAME),
-
+	ConfigSetting("ToggleTouchCircle", SETTING(g_Config.touchControlsLandscape, bToggleTouchCircle), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchCircle", SETTING(g_Config.touchControlsLandscape, bRepeatTouchCircle), false, CfgFlag::PER_GAME),
+	ConfigSetting("ToggleTouchCross", SETTING(g_Config.touchControlsLandscape, bToggleTouchCross), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchCross", SETTING(g_Config.touchControlsLandscape, bRepeatTouchCross), false, CfgFlag::PER_GAME),
+	ConfigSetting("ToggleTouchTriangle", SETTING(g_Config.touchControlsLandscape, bToggleTouchTriangle), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchTriangle", SETTING(g_Config.touchControlsLandscape, bRepeatTouchTriangle), false, CfgFlag::PER_GAME),
+	ConfigSetting("ToggleTouchSquare", SETTING(g_Config.touchControlsLandscape, bToggleTouchSquare), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchSquare", SETTING(g_Config.touchControlsLandscape, bRepeatTouchSquare), false, CfgFlag::PER_GAME),
+	ConfigSetting("ToggleTouchL", SETTING(g_Config.touchControlsLandscape, bToggleTouchL), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchL", SETTING(g_Config.touchControlsLandscape, bRepeatTouchL), false, CfgFlag::PER_GAME),
+	ConfigSetting("ToggleTouchR", SETTING(g_Config.touchControlsLandscape, bToggleTouchR), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchR", SETTING(g_Config.touchControlsLandscape, bRepeatTouchR), false, CfgFlag::PER_GAME),
+	
 	// Combo keys are something else, but I don't want to break the config backwards compatibility so these will stay wrongly named.
 	ConfigSetting("fcombo0X", "fcombo0Y", "comboKeyScale0", "ShowComboKey0", SETTING_IDX(g_Config.touchControlsLandscape, touchCustom, 0), defaultTouchPosHide, CfgFlag::PER_GAME),
 	ConfigSetting("fcombo1X", "fcombo1Y", "comboKeyScale1", "ShowComboKey1", SETTING_IDX(g_Config.touchControlsLandscape, touchCustom, 1), defaultTouchPosHide, CfgFlag::PER_GAME),
