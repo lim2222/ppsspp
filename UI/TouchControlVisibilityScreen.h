@@ -29,9 +29,11 @@ namespace UI {
 
 struct TouchButtonToggle {
 	std::string key;
-	bool *show;
-	ImageID img;
-	std::function<void(UI::EventParams&)> handle;
+    bool *show;
+    ImageID img;
+    std::function<void(UI::EventParams&)> handle;
+    bool *toggle = nullptr;
+    bool *repeat = nullptr;
 };
 
 class TouchControlVisibilityScreen : public UISimpleBaseDialogScreen {

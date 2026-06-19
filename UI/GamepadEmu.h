@@ -102,14 +102,20 @@ private:
 
 class PSPButton : public MultiTouchButton {
 public:
-	PSPButton(int pspButtonBit, std::string_view key, ImageID bgImg, ImageID bgDownImg, ImageID img, float scale, UI::LayoutParams *layoutParams)
-		: MultiTouchButton(key, bgImg, bgDownImg, img, scale, layoutParams), pspButtonBit_(pspButtonBit) {
-	}
-	bool Touch(const TouchInput &input) override;
-	bool IsDownVisually() const override;
+        PSPButton(int pspButtonBit, std::string_view key, ImageID bgImg, ImageID bgDownImg, ImageID img, float scale, UI::LayoutParams *layoutParams, bool toggle = false, bool repeat = false, ControlMapper *controlMapper = nullptr)
+                : MultiTouchButton(key, bgImg, bgDownImg, img, scale, layoutParams), pspButtonBit_(pspButtonBit), toggle_(toggle), repeat_(repeat), controlMapper_(controlMapper) {
+        }
+        bool Touch(const TouchInput &input) override;
+        void Update() override;
+        bool IsDownVisually() const override;
 
 private:
-	int pspButtonBit_;
+        int pspButtonBit_;
+        bool toggle_ = false;
+        bool repeat_ = false;
+        bool on_ = false;
+        int pressedFrames_ = 0;
+        ControlMapper *controlMapper_ = nullptr;
 };
 
 class PSPDpad : public GamepadComponent {
