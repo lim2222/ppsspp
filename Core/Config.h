@@ -137,9 +137,21 @@ struct TouchControlConfig : public ConfigBlock {
 	bool bHideStickBackground = false;
 
 	bool bShowTouchCircle = true;
+	bool bToggleTouchCircle = false;
+	bool bRepeatTouchCircle = false;
 	bool bShowTouchCross = true;
+	bool bToggleTouchCross = false;
+	bool bRepeatTouchCross = false;
 	bool bShowTouchTriangle = true;
+	bool bToggleTouchTriangle = false;
+	bool bRepeatTouchTriangle = false;
 	bool bShowTouchSquare = true;
+	bool bToggleTouchSquare = false;
+	bool bRepeatTouchSquare = false;
+	bool bToggleTouchL = false;
+	bool bRepeatTouchL = false;
+	bool bToggleTouchR = false;
+	bool bRepeatTouchR = false;
 	int iTouchButtonOpacity = 65;
 	void ResetLayout();
 

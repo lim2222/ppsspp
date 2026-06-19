@@ -236,18 +236,32 @@ bool BoolButton::Touch(const TouchInput &input) {
 }
 
 bool PSPButton::Touch(const TouchInput &input) {
-	bool lastDown = pointerDownMask_ != 0;
-	bool retval = MultiTouchButton::Touch(input);
-	bool down = pointerDownMask_ != 0;
-	if (down && !lastDown) {
-		if (g_Config.bHapticFeedback) {
-			System_Vibrate(HAPTIC_VIRTUAL_KEY);
-		}
-		__CtrlUpdateButtons(pspButtonBit_, 0);
-	} else if (lastDown && !down) {
-		__CtrlUpdateButtons(0, pspButtonBit_);
-	}
-	return retval;
+        bool lastDown = pointerDownMask_ != 0;
+        bool retval = MultiTouchButton::Touch(input);
+        bool down = pointerDownMask_ != 0;
+
+        if ((toggle_ || repeat_) && controlMapper_) {
+                if (down && !lastDown) {
+                        if (g_Config.bHapticFeedback)
+                                System_Vibrate(HAPTIC_VIRTUAL_KEY);
+                        if (!repeat_)
+                                controlMapper_->PSPKey(DEVICE_ID_TOUCH, pspButtonBit_, (on_ && toggle_) ? KeyInputFlags::UP : KeyInputFlags::DOWN);
+                        on_ = toggle_ ? !on_ : true;
+                } else if (!toggle_ && lastDown && !down) {
+                        if (!repeat_)
+                                controlMapper_->PSPKey(DEVICE_ID_TOUCH, pspButtonBit_, KeyInputFlags::UP);
+                        on_ = false;
+                }
+        } else {
+                if (down && !lastDown) {
+                        if (g_Config.bHapticFeedback)
+                                System_Vibrate(HAPTIC_VIRTUAL_KEY);
+                        __CtrlUpdateButtons(pspButtonBit_, 0);
+                } else if (lastDown && !down) {
+                        __CtrlUpdateButtons(0, pspButtonBit_);
+                }
+        }
+        return retval;
 }
 
 bool CustomButton::IsDownVisually() const {
@@ -340,7 +354,25 @@ void CustomButton::Update() {
 }
 
 bool PSPButton::IsDownVisually() const {
-	return (__CtrlPeekButtonsVisual() & pspButtonBit_) != 0;
+        if (toggle_) return on_;
+        return (__CtrlPeekButtonsVisual() & pspButtonBit_) != 0;
+}
+
+void PSPButton::Update() {
+        MultiTouchButton::Update();
+        if (!repeat_ || !controlMapper_) return;
+
+        static constexpr int DOWN_FRAME = 5;
+        if (pressedFrames_ == 2 * DOWN_FRAME) {
+                pressedFrames_ = 0;
+        } else if (pressedFrames_ == DOWN_FRAME) {
+                controlMapper_->PSPKey(DEVICE_ID_TOUCH, pspButtonBit_, KeyInputFlags::UP);
+        } else if (on_ && pressedFrames_ == 0) {
+                controlMapper_->PSPKey(DEVICE_ID_TOUCH, pspButtonBit_, KeyInputFlags::DOWN);
+                pressedFrames_ = 1;
+        }
+        if (pressedFrames_ > 0)
+                pressedFrames_++;
 }
 
 PSPDpad::PSPDpad(ImageID arrowIndex, std::string_view key, ImageID arrowDownIndex, ImageID overlayIndex, float scale, float spacing, UI::LayoutParams *layoutParams)
@@ -1037,11 +1069,11 @@ GamepadEmuView::GamepadEmuView(const TouchControlConfig &config, float xres, flo
 	const ImageID stickImage = g_Config.iTouchButtonStyle ? ImageID("I_STICK_LINE") : ImageID("I_STICK");
 	const ImageID stickBg = g_Config.iTouchButtonStyle ? ImageID("I_STICK_BG_LINE") : ImageID("I_STICK_BG");
 
-	auto addPSPButton = [this, buttonLayoutParams](int buttonBit, const char *key, ImageID bgImg, ImageID bgDownImg, ImageID img, const ConfigTouchPos &touch, ButtonOffset off = { 0, 0 }) -> PSPButton * {
-		if (touch.show) {
-			return Add(new PSPButton(buttonBit, key, bgImg, bgDownImg, img, touch.scale, buttonLayoutParams(touch, off)));
-		}
-		return nullptr;
+	auto addPSPButton = [this, buttonLayoutParams, controlMapper](int buttonBit, const char *key, ImageID bgImg, ImageID bgDownImg, ImageID img, const ConfigTouchPos &touch, ButtonOffset off = { 0, 0 }, bool toggle = false, bool repeat = false) -> PSPButton * {
+			if (touch.show) {
+					return Add(new PSPButton(buttonBit, key, bgImg, bgDownImg, img, touch.scale, buttonLayoutParams(touch, off), toggle, repeat, controlMapper));
+			}
+			return nullptr;
 	};
 	auto addBoolButton = [this, buttonLayoutParams](bool *value, const char *key, ImageID bgImg, ImageID bgDownImg, ImageID img, const ConfigTouchPos &touch) -> BoolButton * {
 		if (touch.show) {
@@ -1076,13 +1108,13 @@ GamepadEmuView::GamepadEmuView(const TouchControlConfig &config, float xres, flo
 
 	// touchActionButtonCenter.show will always be true, since that's the default.
 	if (config.bShowTouchCircle)
-		addPSPButton(CTRL_CIRCLE, "Circle button", roundImage, ImageID("I_ROUND"), ImageID("I_CIRCLE"), config.touchActionButtonCenter, circleOffset);
+        addPSPButton(CTRL_CIRCLE,   "Circle button",   roundImage, ImageID("I_ROUND"), ImageID("I_CIRCLE"),   config.touchActionButtonCenter, circleOffset,   config.bToggleTouchCircle,   config.bRepeatTouchCircle);
 	if (config.bShowTouchCross)
-		addPSPButton(CTRL_CROSS, "Cross button", roundImage, ImageID("I_ROUND"), ImageID("I_CROSS"), config.touchActionButtonCenter, crossOffset);
+        addPSPButton(CTRL_CROSS,    "Cross button",    roundImage, ImageID("I_ROUND"), ImageID("I_CROSS"),    config.touchActionButtonCenter, crossOffset,    config.bToggleTouchCross,    config.bRepeatTouchCross);
 	if (config.bShowTouchTriangle)
-		addPSPButton(CTRL_TRIANGLE, "Triangle button", roundImage, ImageID("I_ROUND"), ImageID("I_TRIANGLE"), config.touchActionButtonCenter, triangleOffset);
+        addPSPButton(CTRL_TRIANGLE, "Triangle button", roundImage, ImageID("I_ROUND"), ImageID("I_TRIANGLE"), config.touchActionButtonCenter, triangleOffset, config.bToggleTouchTriangle, config.bRepeatTouchTriangle);
 	if (config.bShowTouchSquare)
-		addPSPButton(CTRL_SQUARE, "Square button", roundImage, ImageID("I_ROUND"), ImageID("I_SQUARE"), config.touchActionButtonCenter, squareOffset);
+        addPSPButton(CTRL_SQUARE,   "Square button",   roundImage, ImageID("I_ROUND"), ImageID("I_SQUARE"),   config.touchActionButtonCenter, squareOffset,   config.bToggleTouchSquare,   config.bRepeatTouchSquare);
 
 	addPSPButton(CTRL_START, "Start button", rectImage, ImageID("I_RECT"), ImageID("I_START"), config.touchStartKey);
 	addPSPButton(CTRL_SELECT, "Select button", rectImage, ImageID("I_RECT"), ImageID("I_SELECT"), config.touchSelectKey);
@@ -1096,8 +1128,8 @@ GamepadEmuView::GamepadEmuView(const TouchControlConfig &config, float xres, flo
 		});
 	}
 
-	addPSPButton(CTRL_LTRIGGER, "Left shoulder button", shoulderImage, ImageID("I_SHOULDER"), ImageID("I_L"), config.touchLKey);
-	PSPButton *rTrigger = addPSPButton(CTRL_RTRIGGER, "Right shoulder button", shoulderImage, ImageID("I_SHOULDER"), ImageID("I_R"), config.touchRKey);
+	addPSPButton(CTRL_LTRIGGER, "Left shoulder button", shoulderImage, ImageID("I_SHOULDER"), ImageID("I_L"), config.touchLKey, {0,0}, config.bToggleTouchL, config.bRepeatTouchL);
+	PSPButton *rTrigger = addPSPButton(CTRL_RTRIGGER, "Right shoulder button", shoulderImage, ImageID("I_SHOULDER"), ImageID("I_R"), config.touchRKey, {0,0}, config.bToggleTouchR, config.bRepeatTouchR);
 	if (rTrigger)
 		rTrigger->FlipImageH(true);
 

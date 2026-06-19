@@ -30,6 +30,28 @@
 
 static const int leftColumnWidth = 140;
 
+class PSPButtonModePopup : public UI::PopupScreen {
+public:
+        PSPButtonModePopup(std::string_view title, bool *toggle, bool *repeat)
+                : UI::PopupScreen(std::string(title), "OK", ""), toggle_(toggle), repeat_(repeat) {}
+
+		const char *tag() const override { return "PSPButtonModePopup"; }
+
+        void CreatePopupContents(UI::ViewGroup *parent) override {
+                auto co = GetI18NCategory(I18NCat::CONTROLS);
+                parent->Add(new UI::CheckBox(toggle_, co->T("Toggle Mode")));
+                parent->Add(new UI::CheckBox(repeat_, co->T("Repeat Mode")));
+        }
+
+        void OnCompleted(DialogResult result) override {
+				g_Config.Save("PSPButtonModePopup");
+		}
+
+private:
+        bool *toggle_;
+        bool *repeat_;
+};
+
 class CheckBoxChoice : public UI::Choice {
 public:
 	CheckBoxChoice(std::string_view text, UI::CheckBox *checkbox, UI::LayoutParams *lp)
@@ -85,13 +107,12 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 	GridLayout *grid = parent->Add(new GridLayoutList(gridsettings, new LayoutParams(FILL_PARENT, WRAP_CONTENT)));
 
 	toggles_.clear();
-	toggles_.push_back({ "Circle", &touch.bShowTouchCircle, ImageID("I_CIRCLE"), nullptr });
-	toggles_.push_back({ "Cross", &touch.bShowTouchCross, ImageID("I_CROSS"), nullptr });
-	toggles_.push_back({ "Square", &touch.bShowTouchSquare, ImageID("I_SQUARE"), nullptr });
-	toggles_.push_back({ "Triangle", &touch.bShowTouchTriangle, ImageID("I_TRIANGLE"), nullptr });
-	toggles_.push_back({ "L", &touch.touchLKey.show, ImageID("I_L"), nullptr });
-	toggles_.push_back({ "R", &touch.touchRKey.show, ImageID("I_R"), nullptr });
-	toggles_.push_back({ "Start", &touch.touchStartKey.show, ImageID("I_START"), nullptr });
+	toggles_.push_back({ "Circle",   &touch.bShowTouchCircle,   ImageID("I_CIRCLE"),   nullptr, &touch.bToggleTouchCircle,   &touch.bRepeatTouchCircle });
+	toggles_.push_back({ "Cross",    &touch.bShowTouchCross,    ImageID("I_CROSS"),    nullptr, &touch.bToggleTouchCross,    &touch.bRepeatTouchCross });
+	toggles_.push_back({ "Square",   &touch.bShowTouchSquare,   ImageID("I_SQUARE"),   nullptr, &touch.bToggleTouchSquare,   &touch.bRepeatTouchSquare });
+	toggles_.push_back({ "Triangle", &touch.bShowTouchTriangle, ImageID("I_TRIANGLE"), nullptr, &touch.bToggleTouchTriangle, &touch.bRepeatTouchTriangle });
+	toggles_.push_back({ "L",        &touch.touchLKey.show,     ImageID("I_L"),        nullptr, &touch.bToggleTouchL,        &touch.bRepeatTouchL });
+	toggles_.push_back({ "R",        &touch.touchRKey.show,     ImageID("I_R"),        nullptr, &touch.bToggleTouchR,        &touch.bRepeatTouchR });	toggles_.push_back({ "Start", &touch.touchStartKey.show, ImageID("I_START"), nullptr });
 	toggles_.push_back({ "Select", &touch.touchSelectKey.show, ImageID("I_SELECT"), nullptr });
 	toggles_.push_back({ "Dpad", &touch.touchDpad.show, ImageID::invalid(), nullptr });
 	toggles_.push_back({ "Analog Stick", &touch.touchAnalogStick.show, ImageID::invalid(), nullptr });
@@ -131,7 +152,15 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 			choice = new Choice(std::string(translated) + " (" + std::string(mc->T("tap to customize")) + ")", "", new LinearLayoutParams(1.0f));
 			choice->OnClick.Add(toggle.handle);
 		} else if (toggle.img.isValid()) {
-			choice = new CheckBoxChoice(toggle.img, checkbox, new LinearLayoutParams(1.0f));
+        if (toggle.toggle != nullptr) {
+                choice = new Choice(toggle.img, new LinearLayoutParams(1.0f));
+                choice->OnClick.Add([this, toggle](UI::EventParams &e) {
+				auto mc = GetI18NCategory(I18NCat::MAPPABLECONTROLS);
+				screenManager()->push(new PSPButtonModePopup(mc->T(toggle.key), toggle.toggle, toggle.repeat));
+				});
+        } else {
+                choice = new CheckBoxChoice(toggle.img, checkbox, new LinearLayoutParams(1.0f));
+        }
 		} else {
 			choice = new CheckBoxChoice(mc->T(toggle.key), checkbox, new LinearLayoutParams(1.0f));
 		}
