@@ -329,7 +329,7 @@ void CustomButton::Update() {
 
 	if (repeat_) {
 		// Give the game some time to process the input, frame based so it's faster when fast-forwarding.
-		static constexpr int DOWN_FRAME = 5;
+		static constexpr int DOWN_FRAME = 2;
 
 		if (pressedFrames_ == 2*DOWN_FRAME) {
 			pressedFrames_ = 0;
@@ -362,7 +362,7 @@ void PSPButton::Update() {
         MultiTouchButton::Update();
         if (!repeat_ || !controlMapper_) return;
 
-        static constexpr int DOWN_FRAME = 5;
+        static constexpr int DOWN_FRAME = 2;
         if (pressedFrames_ == 2 * DOWN_FRAME) {
                 pressedFrames_ = 0;
         } else if (pressedFrames_ == DOWN_FRAME) {
@@ -1119,14 +1119,7 @@ GamepadEmuView::GamepadEmuView(const TouchControlConfig &config, float xres, flo
 	addPSPButton(CTRL_START, "Start button", rectImage, ImageID("I_RECT"), ImageID("I_START"), config.touchStartKey);
 	addPSPButton(CTRL_SELECT, "Select button", rectImage, ImageID("I_RECT"), ImageID("I_SELECT"), config.touchSelectKey);
 
-	BoolButton *fastForward = addBoolButton(&PSP_CoreParameter().fastForward, "Fast-forward button", rectImage, ImageID("I_RECT"), ImageID("I_FAST_FORWARD_LINE"), config.touchFastForwardKey);
-	if (fastForward) {
-		fastForward->OnChange.Add([](UI::EventParams &e) {
-			if (e.a && coreState == CORE_STEPPING_CPU) {
-				Core_Resume();
-			}
-		});
-	}
+	addPSPButton(VIRTKEY_FASTFORWARD, "Fast-forward button", rectImage, ImageID("I_RECT"), ImageID("I_FAST_FORWARD_LINE"), config.touchFastForwardKey, {0,0}, config.bToggleTouchFastForward, config.bRepeatTouchFastForward);
 
 	addPSPButton(CTRL_LTRIGGER, "Left shoulder button", shoulderImage, ImageID("I_SHOULDER"), ImageID("I_L"), config.touchLKey, {0,0}, config.bToggleTouchL, config.bRepeatTouchL);
 	PSPButton *rTrigger = addPSPButton(CTRL_RTRIGGER, "Right shoulder button", shoulderImage, ImageID("I_SHOULDER"), ImageID("I_R"), config.touchRKey, {0,0}, config.bToggleTouchR, config.bRepeatTouchR);

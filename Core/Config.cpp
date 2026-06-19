@@ -913,6 +913,8 @@ static const ConfigSetting touchControlSettings[] = {
 	ConfigSetting("RepeatTouchL", SETTING(g_Config.touchControlsLandscape, bRepeatTouchL), false, CfgFlag::PER_GAME),
 	ConfigSetting("ToggleTouchR", SETTING(g_Config.touchControlsLandscape, bToggleTouchR), false, CfgFlag::PER_GAME),
 	ConfigSetting("RepeatTouchR", SETTING(g_Config.touchControlsLandscape, bRepeatTouchR), false, CfgFlag::PER_GAME),
+	ConfigSetting("ToggleTouchFastForward", SETTING(g_Config.touchControlsLandscape, bToggleTouchFastForward), false, CfgFlag::PER_GAME),
+	ConfigSetting("RepeatTouchFastForward", SETTING(g_Config.touchControlsLandscape, bRepeatTouchFastForward), false, CfgFlag::PER_GAME),
 	
 	// Combo keys are something else, but I don't want to break the config backwards compatibility so these will stay wrongly named.
 	ConfigSetting("fcombo0X", "fcombo0Y", "comboKeyScale0", "ShowComboKey0", SETTING_IDX(g_Config.touchControlsLandscape, touchCustom, 0), defaultTouchPosHide, CfgFlag::PER_GAME),
