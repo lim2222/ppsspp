@@ -1630,13 +1630,20 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			return true;
 		} else if (command.equals("vibrate")) {
 			int milliseconds = -1;
+			int amplitude = -1;
 			if (!params.isEmpty()) {
 				try {
-					milliseconds = Integer.parseInt(params);
-				} catch (NumberFormatException e) {
-					Log.i(TAG,"bad vibrate param " + params);
-				}
-			}
+					if (params.contains(",")) {
+                            String[] parts = params.split(",");
+                            milliseconds = Integer.parseInt(parts[0]);
+                            amplitude = Integer.parseInt(parts[1]);
+                    } else {
+                            milliseconds = Integer.parseInt(params);
+                    }
+                } catch (NumberFormatException e) {
+                        Log.i(TAG,"bad vibrate param " + params);
+                }
+        }
 			// Special parameters to perform standard haptic feedback
 			// operations
 			// -1 = Standard keyboard press feedback
@@ -1658,8 +1665,22 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 							break;
 						default:
 							// Requires the vibrate permission, which we don't have, so disabled.
+							if (amplitude > 0) {
+								try {
+									android.os.Vibrator vibrator = (android.os.Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+									if (vibrator != null && vibrator.hasVibrator()) {
+										if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+											vibrator.vibrate(android.os.VibrationEffect.createOneShot(milliseconds, amplitude));
+										} else {
+											vibrator.vibrate(milliseconds);
+										}
+									}
+								} catch (Exception e) {
+									Log.i(TAG, "vibrate amplitude failed: " + e);
+								}
+							}
 							break;
-					}
+			}
 				} catch (Exception e) {
 					// Ignore. Seen these in reporting but don't understand how.
 				}
