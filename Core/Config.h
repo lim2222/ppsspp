@@ -536,7 +536,8 @@ public:
 	bool bShowTouchPause;
 
 	bool bHapticFeedback;
-
+	int iHapticStrength = 2;  // 1=Light, 2=Medium, 3=Strong
+	
 	// We also use the XInput settings as analog settings on other platforms like Android.
 	float fAnalogDeadzone;
 	float fAnalogInverseDeadzone;

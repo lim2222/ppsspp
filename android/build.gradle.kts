@@ -90,7 +90,10 @@ android {
 			storeFile = file("debug.keystore")
 		}
 		create("optimized") {
-			storeFile = file("debug.keystore")
+				storeFile = file("debug.keystore")
+				storePassword = "android"
+				keyAlias = "androiddebugkey"
+				keyPassword = "android"
 		}
 		if (project.hasProperty("RELEASE_STORE_FILE")) {
 			create("release") {
