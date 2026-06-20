@@ -884,7 +884,10 @@ void GameSettingsScreen::CreateControlsSettings(UI::ViewGroup *controlsSettings)
 
 		if (System_GetPropertyInt(SYSPROP_DEVICE_TYPE) == DEVICE_TYPE_MOBILE) {
 			controlsSettings->Add(new CheckBox(&g_Config.bHapticFeedback, co->T("HapticFeedback", "Haptic Feedback (vibration)")));
-		}
+			static const char *hapticStrengths[] = { "Light", "Medium", "Strong" };
+			PopupMultiChoice *hapticStrength = controlsSettings->Add(new PopupMultiChoice(&g_Config.iHapticStrength, co->T("Haptic Strength"), hapticStrengths, 1, ARRAY_SIZE(hapticStrengths), I18NCat::CONTROLS, screenManager()));
+			hapticStrength->SetEnabledPtr(&g_Config.bHapticFeedback);
+	}
 
 		// The pause button is now a regular on-screen button.
 

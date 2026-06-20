@@ -363,9 +363,19 @@ void System_ShowKeyboard() {
 }
 
 void System_Vibrate(int length_ms) {
-	char temp[32];
-	snprintf(temp, sizeof(temp), "%d", length_ms);
-	PushCommand("vibrate", temp);
+    char temp[32];
+    if (length_ms == HAPTIC_VIRTUAL_KEY) {
+            int amplitude = 80;
+            switch (g_Config.iHapticStrength) {
+                    case 1: amplitude = 40; break;
+                    case 2: amplitude = 140; break;
+                    case 3: amplitude = 255; break;
+            }
+            snprintf(temp, sizeof(temp), "%d,%d", 50, amplitude);
+    } else {
+            snprintf(temp, sizeof(temp), "%d", length_ms);
+    }
+    PushCommand("vibrate", temp);
 }
 
 void System_LaunchUrl(LaunchUrlType urlType, std::string_view url) {
