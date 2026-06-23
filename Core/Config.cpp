@@ -990,6 +990,8 @@ static const ConfigSetting touchControlSettings[] = {
 static const ConfigSetting controlSettings[] = {
 	ConfigSetting("HapticFeedback", SETTING(g_Config, bHapticFeedback), false, CfgFlag::PER_GAME),
 	ConfigSetting("HapticStrength", SETTING(g_Config, iHapticStrength), 2, CfgFlag::PER_GAME),
+	ConfigSetting("AnimationBackground", SETTING(g_Config, bAnimationBackground), false, CfgFlag::PER_GAME),
+	ConfigSetting("BackgroundVideoWhitelist", SETTING(g_Config, sBackgroundVideoWhitelist), "", CfgFlag::PER_GAME),
 	
 #if defined(USING_WIN_UI)
 	ConfigSetting("IgnoreWindowsKey", SETTING(g_Config, bIgnoreWindowsKey), false, CfgFlag::PER_GAME),

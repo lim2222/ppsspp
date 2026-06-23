@@ -19,6 +19,7 @@
 
 #include <vector>
 #include <string>
+#include <set>
 #include "Common/Render/TextureAtlas.h"
 #include "UI/BaseScreens.h"
 #include "UI/SimpleDialogScreen.h"
@@ -49,6 +50,7 @@ public:
 private:
 	std::vector<TouchButtonToggle> toggles_;
 	bool nextToggleAll_ = true;
+
 };
 
 class RightAnalogMappingScreen : public UISimpleBaseDialogScreen {

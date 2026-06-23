@@ -997,9 +997,9 @@ if(USE_FFMPEG)
 			if(NOT USE_SYSTEM_FFMPEG)
 				if(ANDROID)
 					if(ARMV7)
-						set(PLATFORM_ARCH "android/armv7")
+						set(PLATFORM_ARCH "android/armeabi-v7a")
 					elseif(ARM64)
-						set(PLATFORM_ARCH "android/arm64")
+						set(PLATFORM_ARCH "android/arm64-v8a")
 					elseif(X86_64)
 						set(PLATFORM_ARCH "android/x86_64")
 					elseif(X86)
@@ -2458,6 +2458,8 @@ add_library(${CoreLibName} ${CoreLinkType}
 	Core/HW/Display.h
 	Core/HW/GranularMixer.cpp
 	Core/HW/GranularMixer.h
+	Core/HW/BackgroundPlayer.cpp
+	Core/HW/BackgroundPlayer.h
 	Core/HW/MediaEngine.cpp
 	Core/HW/MediaEngine.h
 	Core/HW/MpegDemux.cpp
