@@ -77,6 +77,7 @@ using namespace std::placeholders;
 #include "Core/Screenshot.h"
 #include "Core/HLE/__sceAudio.h"
 #include "Core/HW/Display.h"
+#include "Core/HW/BackgroundPlayer.h"
 
 #include "UI/BackgroundAudio.h"
 #include "UI/GamepadEmu.h"
@@ -246,22 +247,26 @@ void EmuScreen::ProcessGameBoot(const Path &filename) {
 		ERROR_LOG(Log::Boot, "Boot failed: %s", errorMessage_.c_str());
 		return;
 	case BootState::Complete:
-		// Done booting!
-		g_BackgroundAudio.SetGame(Path());
-		bootPending_ = false;
-		errorMessage_.clear();
-
-		if (PSP_CoreParameter().startBreak) {
-			coreState = CORE_STEPPING_CPU;
-			System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
-		} else {
-			coreState = CORE_RUNNING_CPU;
+        // Done booting!
+        g_BackgroundAudio.SetGame(Path());
+        bootPending_ = false;
+        errorMessage_.clear();
+        if (PSP_CoreParameter().startBreak) {
+                coreState = CORE_STEPPING_CPU;
+                System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
+        } else {
+                coreState = CORE_RUNNING_CPU;
+        }
+        Achievements::Initialize();
+        
+		if (g_Config.bAnimationBackground) {
+			if (!g_BackgroundPlayer)
+                g_BackgroundPlayer = new BackgroundPlayer();
+        g_BackgroundPlayer->LoadFromBackgroundFolder(g_Config.memStickDirectory.ToString(),
+                                              g_Config.sBackgroundVideoWhitelist);
 		}
-
-		Achievements::Initialize();
-
-		readyToFinishBoot_ = true;
-		return;
+        readyToFinishBoot_ = true;
+        return;
 	case BootState::Off:
 		// Gotta start the boot process! Continue below.
 		break;
@@ -1629,16 +1634,90 @@ ScreenRenderFlags EmuScreen::render(ScreenRenderMode mode) {
 		screenRenderFlags = RunEmulation(true);
 	}
 
-	draw->SetViewport(viewport);
+    draw->SetViewport(viewport);
+    ProcessQueuedVKeys();
+    const bool skipBufferEffects = skipBufferEffects_;
 
-	ProcessQueuedVKeys();
+	// Draw the animation background (if enabled) before the PSP screen, so the
+	// PSP screen draws on top of it and the background only shows in the margins.
+    if (g_Config.bAnimationBackground &&
+		g_BackgroundPlayer && g_BackgroundPlayer->IsLoaded()) {
+        double now = time_now_d();
+        g_BackgroundPlayer->Update(now);
+        int frameW = 0, frameH = 0;
+        const uint8_t *rgba = g_BackgroundPlayer->GetFrameRGBA(&frameW, &frameH);
+        if (rgba && frameW > 0 && frameH > 0) {
+            if (!backgroundTex_ || backgroundTexW_ != frameW || backgroundTexH_ != frameH) {
+                if (backgroundTex_) {
+                    backgroundTex_->Release();
+                    backgroundTex_ = nullptr;
+                }
+                Draw::TextureDesc desc{};
+                desc.type = Draw::TextureType::LINEAR2D;
+                desc.format = Draw::DataFormat::R8G8B8A8_UNORM;
+                desc.width = frameW;
+                desc.height = frameH;
+                desc.depth = 1;
+                desc.mipLevels = 1;
+                desc.generateMips = false;
+                desc.tag = "BackgroundPlayer";
+                desc.initData.push_back(rgba);
+                backgroundTex_ = draw->CreateTexture(desc);
+                backgroundTexW_ = frameW;
+                backgroundTexH_ = frameH;
+            } else {
+                const uint8_t *levels[1] = {rgba};
+                draw->UpdateTextureLevels(backgroundTex_, levels, nullptr, 1);
+            }
 
-	const bool skipBufferEffects = skipBufferEffects_;
+            if (backgroundTex_) {
+                FRect frame = GetScreenFrame(false, (float) g_display.dp_xres,
+                                             (float) g_display.dp_yres);
+                FRect pspRect{};
+                CalculateDisplayOutputRect(displayLayoutConfig, &pspRect, 480.0f, 272.0f, frame, 0);
 
-	// Gotta copy the output at some point. Also this is where we take the screenshot if needed.
-	if (gpu) {
-		gpu->CopyDisplayToOutput(displayLayoutConfig);
-	}
+                UIContext &dc = *screenManager()->getUIContext();
+
+                if (orientation == DeviceOrientation::Portrait) {
+                    // Portrait: draw below the PSP screen.
+					// If want to more stretch repalace drawH,drawY
+                    // float drawH = bgH * 1.08f;
+                    // float drawY = bgY - (drawH - bgH) * 0.5f;
+                    float bgY = pspRect.y + pspRect.h;
+                    float bgH = (float) g_display.dp_yres - bgY;
+                    if (bgH > 0) {
+                        dc.Begin();
+                        dc.GetDrawContext()->BindTexture(0, backgroundTex_);
+                        dc.Draw()->Rect(0, bgY, (float) g_display.dp_xres, bgH, 0xFFFFFFFF);
+                        dc.Flush();
+                        dc.RebindTexture();
+                    }
+                } else {
+                    // Landscape: draw in left and right margins beside the PSP screen.
+                    float leftW = pspRect.x;
+                    float rightX = pspRect.x + pspRect.w;
+                    float rightW = (float) g_display.dp_xres - rightX;
+                    float screenH = (float) g_display.dp_yres;
+
+                    dc.Begin();
+                    dc.GetDrawContext()->BindTexture(0, backgroundTex_);
+                    if (leftW > 0) {
+                        dc.Draw()->Rect(0, 0, leftW, screenH, 0xFFFFFFFF);
+                    }
+                    if (rightW > 0) {
+                        dc.Draw()->Rect(rightX, 0, rightW, screenH, 0xFFFFFFFF);
+                    }
+                    dc.Flush();
+                    dc.RebindTexture();
+                }
+            }
+        }
+    }
+
+// Gotta copy the output at some point. Also this is where we take the screenshot if needed.
+if (gpu) {
+        gpu->CopyDisplayToOutput(displayLayoutConfig);
+}
 
 	// Reset the viewport. Needed in case Cardboard or something similar was enabled.
 	draw->SetViewport(viewport);

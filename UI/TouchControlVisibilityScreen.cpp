@@ -24,9 +24,10 @@
 #include "Common/UI/ScreenManager.h"
 
 #include "Core/Config.h"
-
+#include "Core/HW/BackgroundPlayer.h"
 #include "UI/TouchControlVisibilityScreen.h"
 #include "UI/CustomButtonMappingScreen.h"
+
 
 static const int leftColumnWidth = 140;
 
@@ -50,6 +51,99 @@ public:
 private:
         bool *toggle_;
         bool *repeat_;
+};
+
+class BackgroundVideoSelectPopup : public UI::PopupScreen {
+public:
+    BackgroundVideoSelectPopup()
+        : UI::PopupScreen("Background Videos", "OK", "") {}
+
+    const char *tag() const override { return "BackgroundVideoSelectPopup"; }
+
+    void CreatePopupContents(UI::ViewGroup *parent) override {
+        // Scan PSP/BACKGROUND/ folder.
+        std::string folder = g_Config.memStickDirectory.ToString();
+        if (!folder.empty() && folder.back() != '/' && folder.back() != '\\') folder += "/";
+        folder += "PSP/BACKGROUND/";
+
+        fileNames_.clear();
+        fileStates_.clear();
+
+        const char *exts[] = {".mp4", ".mkv", ".webm", ".mov", ".avi"};
+
+        // Parse whitelist.
+        std::set<std::string> enabled;
+        bool hasWhitelist = !g_Config.sBackgroundVideoWhitelist.empty();
+        if (hasWhitelist) {
+            std::vector<std::string> parts;
+            SplitString(g_Config.sBackgroundVideoWhitelist, ',', parts);
+            for (auto &p : parts) {
+                std::string lower = p;
+                for (auto &c : lower) c = tolower(c);
+                enabled.insert(lower);
+            }
+        }
+
+        if (File::Exists(Path(folder))) {
+            std::vector<File::FileInfo> files;
+            File::GetFilesInDir(Path(folder), &files);
+            std::sort(files.begin(), files.end(),
+                [](const File::FileInfo &a, const File::FileInfo &b) {
+                    return a.name < b.name;
+                });
+
+            for (auto &f : files) {
+                if (f.isDirectory) continue;
+                std::string lower = f.name;
+                for (auto &c : lower) c = tolower(c);
+                bool isVideo = false;
+                for (auto e : exts) {
+                    if (endsWith(lower, e)) { isVideo = true; break; }
+                }
+                if (!isVideo) continue;
+                fileNames_.push_back(f.name);
+                bool on = !hasWhitelist || enabled.count(lower) > 0;
+                fileStates_.push_back(on ? 1 : 0);
+            }
+        }
+
+        if (fileNames_.empty()) {
+            parent->Add(new UI::TextView("No video files found in PSP/BACKGROUND/"));
+            return;
+        }
+
+        for (int i = 0; i < (int)fileNames_.size(); i++) {
+            parent->Add(new UI::CheckBox(
+                reinterpret_cast<bool*>(&fileStates_[i]),
+                fileNames_[i]));
+        }
+    }
+
+    void OnCompleted(DialogResult result) override {
+        if (result != DR_OK) return;
+        std::string whitelist;
+        for (int i = 0; i < (int) fileNames_.size(); i++) {
+            if (fileStates_[i]) {
+                if (!whitelist.empty()) whitelist += ",";
+                std::string lower = fileNames_[i];
+                for (auto &c: lower) c = tolower(c);
+                whitelist += lower;
+            }
+        }
+        g_Config.sBackgroundVideoWhitelist = whitelist;
+        g_Config.Save("BackgroundVideoSelectPopup");
+
+        // Reload playlist immediately so changes take effect without restarting the game.
+        if (g_BackgroundPlayer) {
+            g_BackgroundPlayer->LoadFromBackgroundFolder(
+                    g_Config.memStickDirectory.ToString(),
+                    g_Config.sBackgroundVideoWhitelist);
+        }
+    }
+
+private:
+    std::vector<std::string> fileNames_;
+    std::vector<char> fileStates_;
 };
 
 class CheckBoxChoice : public UI::Choice {
@@ -122,6 +216,11 @@ void TouchControlVisibilityScreen::CreateDialogViews(UI::ViewGroup *parent) {
 	toggles_.push_back({ "Fast-forward", &touch.touchFastForwardKey.show, ImageID::invalid(), nullptr, &touch.bToggleTouchFastForward, &touch.bRepeatTouchFastForward});
 	toggles_.push_back({ "Pause", &touch.touchPauseKey.show, ImageID("I_HAMBURGER"), nullptr});
 	toggles_.push_back({ "Taiko Drum", &touch.touchTatacon.show, ImageID::invalid(), nullptr});
+    toggles_.push_back({"Animation Background", &g_Config.bAnimationBackground, ImageID::invalid(),
+                        [=](EventParams &e) {
+                            screenManager()->push(new BackgroundVideoSelectPopup());
+                        }
+                       });
 
 	for (int i = 0; i < TouchControlConfig::CUSTOM_BUTTON_COUNT; i++) {
 		char temp[256];

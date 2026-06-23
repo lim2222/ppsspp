@@ -101,6 +101,10 @@ private:
 	bool bootIsReset_ = false;
 	Path gamePath_;
 
+	Draw::Texture *backgroundTex_ = nullptr;
+	int backgroundTexW_ = 0;
+	int backgroundTexH_ = 0;
+	
 	bool quit_ = false;
 	std::string errorMessage_;
 

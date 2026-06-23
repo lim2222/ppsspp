@@ -537,6 +537,8 @@ public:
 
 	bool bHapticFeedback;
 	int iHapticStrength = 2;  // 1=Light, 2=Medium, 3=Strong
+	bool bAnimationBackground = false;
+	std::string sBackgroundVideoWhitelist;  // comma-separated enabled filenames
 	
 	// We also use the XInput settings as analog settings on other platforms like Android.
 	float fAnalogDeadzone;
