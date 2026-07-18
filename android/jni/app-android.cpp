@@ -283,7 +283,7 @@ void System_Vibrate(int length_ms) {
                     case 2: amplitude = 140; break;
                     case 3: amplitude = 255; break;
             }
-            snprintf(temp, sizeof(temp), "%d,%d", 50, amplitude);
+            snprintf(temp, sizeof(temp), "%d,%d", 80, amplitude);
     } else {
             snprintf(temp, sizeof(temp), "%d", length_ms);
     }
