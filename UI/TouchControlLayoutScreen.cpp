@@ -420,8 +420,8 @@ bool ControlLayoutView::Touch(const TouchInput &touch) {
                         TataconDragDrop *isTatacon = dynamic_cast<TataconDragDrop *>(pickedControl_);
                         if (isTatacon) {
                             float w = validRange.w;
-                            validRange.x = -w;        // 允许往左超出一个屏幕宽度
-                            validRange.w = w * 3.0f;  // 保持右边界不变
+                            validRange.x = -w;        // Allow extending one screen width past the left edge.
+                            validRange.w = w * 3.0f;  // Keep the right edge unchanged.
                         } else {
                             validRange.x = 0.0f;
                         }
