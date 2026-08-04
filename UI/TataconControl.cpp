@@ -4,6 +4,7 @@
 
 #include "Common/Data/Color/RGBAUtil.h"
 #include "Common/System/System.h"
+#include "Common/System/Display.h"
 #include "Common/UI/Context.h"
 #include "Common/UI/Screen.h"  
 #include "Core/Config.h"
@@ -84,11 +85,21 @@ void TataconControl::Draw(UIContext &dc) {
 
 	// Center hit effect
 	if (centerPressed) {
-		float centerW = drumRadius * 1.5f;        
-		float centerH = drumRadius * 2.0f * 0.63f; 
-		
+		float centerW = drumRadius * 1.5f;
+		float centerH = drumRadius * 2.0f * 0.63f;
+
+		// Horizontal offset of the center hit glow (positive = move right).
+		// Calibrated per orientation: portrait needed a right nudge (the glow
+		// otherwise sat left of drum center); in landscape the glow is already
+		// centered, so keep it at ~0 there. Tune each independently.
+		float centerOffsetX;
+		if (g_display.GetDeviceOrientation() == DeviceOrientation::Portrait)
+			centerOffsetX = drumRadius * 0.01f;   // portrait: small right nudge
+		else
+			centerOffsetX = 0.0f;                 // landscape: no shift
+
 		Bounds centerBounds(
-			drumCenterX - centerW * 0.5f,
+			drumCenterX - centerW * 0.5f + centerOffsetX,
 			drumCenterY - centerH * 0.5f,
 			centerW, centerH);
 		dc.Draw()->DrawImageStretch(ImageID("I_ROUND"), centerBounds,
@@ -113,7 +124,7 @@ bool TataconControl::Touch(const TouchInput &touch) {
 	}
 
 	if (touch.flags & TouchInputFlags::DOWN) {
-		// 如果这个 pointer 已经被其他按键占用，不响应
+		// If this pointer is already claimed by another button, ignore it.
 		if (IsPointerUsed(touch.id)) {
 			return false;
 		}
@@ -130,7 +141,7 @@ bool TataconControl::Touch(const TouchInput &touch) {
 			if (mask != pointerButtons_[touch.id]) {
 				ReleasePointer(touch.id);
 				if (mask != 0) {
-					// MOVE 时也检查 usedPointerMask
+					// Also re-check usedPointerMask on MOVE.
 					if (!(IsPointerUsed(touch.id))) {
 						PressPointer(touch.id, mask);
 					}
