@@ -960,12 +960,14 @@ static const ConfigSetting touchControlSettings[] = {
 	ConfigSetting("HideStickBackground", SETTING(g_Config.touchControlsLandscape, bHideStickBackground), CfgFlag::PER_GAME),
 };
 
+C++
 static const ConfigSetting controlSettings[] = {
 	ConfigSetting("HapticFeedback", SETTING(g_Config, bHapticFeedback), false, CfgFlag::PER_GAME),
 	ConfigSetting("HapticStrength", SETTING(g_Config, iHapticStrength), 2, CfgFlag::PER_GAME),
 	ConfigSetting("AnimationBackground", SETTING(g_Config, bAnimationBackground), false, CfgFlag::PER_GAME),
 	ConfigSetting("BackgroundVideoWhitelist", SETTING(g_Config, sBackgroundVideoWhitelist), "", CfgFlag::PER_GAME),
-	
+	ConfigSetting("BackgroundVideoPath", SETTING(g_Config, sBackgroundVideoPath), "", CfgFlag::PER_GAME),
+
 #if PPSSPP_PLATFORM(WINDOWS)
 	ConfigSetting("IgnoreWindowsKey", SETTING(g_Config, bIgnoreWindowsKey), false, CfgFlag::PER_GAME),
 #endif

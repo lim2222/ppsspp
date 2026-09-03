@@ -2,18 +2,19 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <cstdio>
 
 struct AVFormatContext;
 struct AVCodecContext;
 struct AVFrame;
 struct SwsContext;
+struct AVIOContext;
 
 class BackgroundPlayer {
 public:
     BackgroundPlayer();
     ~BackgroundPlayer();
 
-    // Scans folder, filters by whitelist (empty whitelist = all files enabled).
     bool LoadFromBackgroundFolder(const std::string &memstickRoot,
                                   const std::string &whitelist);
     bool Update(double nowSeconds);
@@ -27,17 +28,23 @@ private:
     void CloseCodecAndFormat();
     bool AdvanceToNextFile();
 
-    // Playlist
+    static int IOReadPacket(void *opaque, uint8_t *buf, int bufSize);
+    static int64_t IOSeek(void *opaque, int64_t offset, int whence);
+
     std::vector<std::string> playlist_;
     int playlistIndex_ = 0;
+
+    FILE *ioFile_ = nullptr;
+    AVIOContext *avioCtx_ = nullptr;
+    uint8_t *rgbaBuffer_ = nullptr;
+    int rgbaBufferSize_ = 0;
 
     AVFormatContext *formatCtx_ = nullptr;
     AVCodecContext *codecCtx_ = nullptr;
     AVFrame *frame_ = nullptr;
     AVFrame *frameRGBA_ = nullptr;
     SwsContext *swsCtx_ = nullptr;
-    uint8_t *rgbaBuffer_ = nullptr;
-    int rgbaBufferSize_ = 0;
+    uint8_t *ioBuffer_ = nullptr;
 
     int videoStreamIndex_ = -1;
     int width_ = 0, height_ = 0;
