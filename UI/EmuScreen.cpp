@@ -261,9 +261,12 @@ void EmuScreen::ProcessGameBoot(const Path &filename) {
         
 		if (g_Config.bAnimationBackground) {
 			if (!g_BackgroundPlayer)
-                g_BackgroundPlayer = new BackgroundPlayer();
-        g_BackgroundPlayer->LoadFromBackgroundFolder(g_Config.memStickDirectory.ToString(),
-                                              g_Config.sBackgroundVideoWhitelist);
+				g_BackgroundPlayer = new BackgroundPlayer();
+			std::string bgPath = g_Config.sBackgroundVideoPath;
+			if (bgPath.empty()) {
+				bgPath = g_Config.memStickDirectory.ToString();
+			}
+			g_BackgroundPlayer->LoadFromBackgroundFolder(bgPath, g_Config.sBackgroundVideoWhitelist);
 		}
         readyToFinishBoot_ = true;
         return;
