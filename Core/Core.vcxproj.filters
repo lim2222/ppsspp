@@ -529,6 +529,9 @@
     <ClCompile Include="HW\AsyncIOManager.cpp">
       <Filter>HW</Filter>
     </ClCompile>
+    <ClCompile Include="HW\BackgroundPlayer.cpp">
+      <Filter>HW</Filter>
+    </ClCompile>
     <ClCompile Include="MIPS\MIPSStackWalk.cpp">
       <Filter>MIPS</Filter>
     </ClCompile>
@@ -1849,6 +1852,9 @@
       <Filter>FileSystems</Filter>
     </ClInclude>
     <ClInclude Include="HW\AsyncIOManager.h">
+      <Filter>HW</Filter>
+    </ClInclude>
+    <ClInclude Include="HW\BackgroundPlayer.h">
       <Filter>HW</Filter>
     </ClInclude>
     <ClInclude Include="MIPS\MIPSStackWalk.h">

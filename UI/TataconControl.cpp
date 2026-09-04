@@ -1,12 +1,13 @@
 #include "UI/TataconControl.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "Common/Data/Color/RGBAUtil.h"
 #include "Common/System/System.h"
 #include "Common/System/Display.h"
 #include "Common/UI/Context.h"
-#include "Common/UI/Screen.h"  
+#include "Common/UI/ScreenManager.h"
 #include "Core/Config.h"
 #include "Core/HLE/sceCtrl.h"
 extern ScreenManager *g_screenManager;
@@ -94,7 +95,7 @@ void TataconControl::Draw(UIContext &dc) {
 		// centered, so keep it at ~0 there. Tune each independently.
 		float centerOffsetX;
 		if (g_display.GetDeviceOrientation() == DeviceOrientation::Portrait)
-			centerOffsetX = drumRadius * 0.01f;   // portrait: small right nudge
+			centerOffsetX = drumRadius * 0.0f;   // portrait: small right nudge
 		else
 			centerOffsetX = 0.0f;                 // landscape: no shift
 

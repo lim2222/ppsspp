@@ -91,6 +91,8 @@ list(APPEND UISource
 	ReportScreen.cpp
 	SavedataScreen.h
 	SavedataScreen.cpp
+	TataconControl.h
+	TataconControl.cpp
 	SystemInfoScreen.h
 	SystemInfoScreen.cpp
 	Store.h
