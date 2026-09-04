@@ -82,6 +82,9 @@
     <ClCompile Include="GamepadEmu.cpp">
       <Filter>Views</Filter>
     </ClCompile>
+    <ClCompile Include="TataconControl.cpp">
+      <Filter>Views</Filter>
+    </ClCompile>
     <ClCompile Include="JoystickHistoryView.cpp">
       <Filter>Views</Filter>
     </ClCompile>
@@ -234,6 +237,9 @@
     </ClInclude>
     <ClInclude Include="Theme.h" />
     <ClInclude Include="GamepadEmu.h">
+      <Filter>Views</Filter>
+    </ClInclude>
+    <ClInclude Include="TataconControl.h">
       <Filter>Views</Filter>
     </ClInclude>
     <ClInclude Include="JoystickHistoryView.h">

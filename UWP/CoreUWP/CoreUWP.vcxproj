@@ -253,6 +253,7 @@
     <ClInclude Include="..\..\Core\HLE\ThreadQueueList.h" />
     <ClInclude Include="..\..\Core\HLE\__sceAudio.h" />
     <ClInclude Include="..\..\Core\HW\AsyncIOManager.h" />
+    <ClInclude Include="..\..\Core\HW\BackgroundPlayer.h" />
     <ClInclude Include="..\..\Core\HW\BufferQueue.h" />
     <ClInclude Include="..\..\Core\HW\Camera.h" />
     <ClInclude Include="..\..\Core\HW\Display.h" />
@@ -533,6 +534,7 @@
     <ClCompile Include="..\..\Core\HLE\sceVaudio.cpp" />
     <ClCompile Include="..\..\Core\HLE\__sceAudio.cpp" />
     <ClCompile Include="..\..\Core\HW\AsyncIOManager.cpp" />
+    <ClCompile Include="..\..\Core\HW\BackgroundPlayer.cpp" />
     <ClCompile Include="..\..\Core\HW\BufferQueue.cpp" />
     <ClCompile Include="..\..\Core\HW\Camera.cpp" />
     <ClCompile Include="..\..\Core\HW\Display.cpp" />

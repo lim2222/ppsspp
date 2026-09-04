@@ -607,6 +607,8 @@ add_library(Core STATIC
 	HW/SimpleAudioDec.h
 	HW/AsyncIOManager.cpp
 	HW/AsyncIOManager.h
+	HW/BackgroundPlayer.cpp
+	HW/BackgroundPlayer.h
 	HW/BufferQueue.cpp
 	HW/BufferQueue.h
 	HW/Camera.cpp
