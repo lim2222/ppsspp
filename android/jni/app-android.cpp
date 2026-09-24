@@ -283,7 +283,7 @@ void System_Vibrate(int length_ms) {
                     case 2: amplitude = 140; break;
                     case 3: amplitude = 255; break;
             }
-            snprintf(temp, sizeof(temp), "%d,%d", 80, amplitude);
+            snprintf(temp, sizeof(temp), "%d,%d", 100, amplitude);
     } else {
             snprintf(temp, sizeof(temp), "%d", length_ms);
     }
@@ -1074,6 +1074,9 @@ bool System_MakeRequest(SystemRequestType type, int requestId, const std::string
 	case SystemRequestType::RESTART_APP:
 		PushCommand("graphics_restart", param1);
 		return true;
+	case SystemRequestType::FULL_RESTART:
+		PushCommand("full_restart", param1);
+		return true;		
 	case SystemRequestType::RECREATE_ACTIVITY:
 		PushCommand("recreate", param1);
 		return true;

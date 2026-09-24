@@ -305,14 +305,16 @@ extern const std::string INDEX_FILENAME;
 static void MountFileSystems() {
 	FileSystemFlags memstickFlags = FileSystemFlags::SIMULATE_FAT32 | FileSystemFlags::CARD;
 
+	Path effectiveMemStickRoot = GetSysDirectory(DIRECTORY_MEMSTICK_ROOT);
+
 	Path pspDir = GetSysDirectory(DIRECTORY_PSP);
-	if (pspDir == g_Config.memStickDirectory) {
+	if (pspDir == effectiveMemStickRoot) {
 		// Initially tried to do this with dual mounts, but failed due to save state compatibility issues.
 		INFO_LOG(Log::sceIo, "Enabling /PSP compatibility mode");
 		memstickFlags |= FileSystemFlags::STRIP_PSP;
 	}
 
-	auto memstickSystem = std::make_shared<DirectoryFileSystem>(&pspFileSystem, g_Config.memStickDirectory, memstickFlags);
+	auto memstickSystem = std::make_shared<DirectoryFileSystem>(&pspFileSystem, effectiveMemStickRoot, memstickFlags);
 
 	pspFileSystem.Mount("ms0:", memstickSystem);
 	pspFileSystem.Mount("fatms0:", memstickSystem);
@@ -458,6 +460,13 @@ static bool CPU_Init(FileLoader *fileLoader, IdentifiedFileType type, std::strin
 	// Homebrew get fake disc IDs assigned to the global paramSFO, so they shouldn't clash with real games.
 
 	std::string discId = g_paramSFO.GetDiscID();
+	
+	// Preload game-specific settings so the per-game memstick override 
+	// is loaded from its ini before MountFileSystems() mounts.
+	if (!discId.empty()) {
+                g_Config.LoadGameConfig(discId);
+        }
+
 	g_CoreParameter.compat.Load(discId);
 	ShowCompatWarnings(g_CoreParameter.compat);
 

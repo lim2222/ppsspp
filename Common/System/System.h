@@ -77,6 +77,7 @@ enum class SystemRequestType {
 
 	EXIT_APP,
 	RESTART_APP,  // For graphics backend changes
+	FULL_RESTART,  // For per-game memstick folder changes: fully kill and relaunch the process
 	RECREATE_ACTIVITY,  // Android
 	COPY_TO_CLIPBOARD,
 	SHARE_TEXT,

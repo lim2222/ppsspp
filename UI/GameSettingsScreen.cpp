@@ -108,7 +108,7 @@ extern AndroidAudioState *g_audioState;
 void SetMemStickDirDarwin(int requesterToken) {
 	auto initialPath = g_Config.memStickDirectory;
 	INFO_LOG(Log::System, "Current path: %s", initialPath.c_str());
-	System_BrowseForFolder(requesterToken, "", initialPath, [](std::string_view value, int) {
+	System_BrowseForFolder(requesterToken, "", initialPath, [=](std::string_view value, int) {
 		INFO_LOG(Log::System, "Selected path: %.*s", STR_VIEW(value));
 		DarwinFileSystemServices::setUserPreferredMemoryStickDirectory(Path(value));
 	});
@@ -124,7 +124,9 @@ GameSettingsScreen::GameSettingsScreen(const Path &gamePath, std::string gameID,
 		std::shared_ptr<GameInfo> info = g_gameInfoCache->GetInfo(nullptr, gamePath_, GameInfoFlags::PARAM_SFO);
 		g_Config.LoadGameConfig(gameID_);
 	}
-
+	
+	prevPerGameMemStickDirectory_ = g_Config.sPerGameMemStickDirectory;
+	
 	iAlternateSpeedPercent1_ = g_Config.iFpsLimit1 < 0 ? -1 : (g_Config.iFpsLimit1 * 100) / 60;
 	iAlternateSpeedPercent2_ = g_Config.iFpsLimit2 < 0 ? -1 : (g_Config.iFpsLimit2 * 100) / 60;
 	iAlternateSpeedPercentAnalog_ = (g_Config.iAnalogFpsLimit * 100) / 60;
@@ -1360,6 +1362,112 @@ void GameSettingsScreen::CreateSystemSettings(UI::ViewGroup *systemSettings) {
 	}
 #endif
 #endif
+
+// --- Custom per-game Memory Stick for DLC swapping (compat version) ---
+	{
+		// 清理掉曾经意外混入的空字符串条目（历史遗留脏数据，会导致列表里出现空白行）
+		{
+			auto &list = g_Config.vMemStickPlaylist;
+			list.erase(std::remove(list.begin(), list.end(), std::string("")), list.end());
+		}
+
+		auto GetDisplay = [](const std::string &path) -> std::string {
+			if (path.empty()) return "";
+			Path p = Path(path);
+			std::string fileName = p.GetFilename();
+			return fileName.empty() ? path : fileName;
+		};
+
+		auto PromptExitForMemStickChange = [=](std::string previousValue) {
+			auto sy = GetI18NCategory(I18NCat::SYSTEM);
+			screenManager()->push(new PromptScreen(gamePath_,
+				sy->T("Memory stick folder changed. PPSSPP needs to fully close - please reopen it manually."),
+				sy->T("Exit now"), sy->T("Cancel"),
+				[=](bool yes) {
+					if (yes) {
+						g_Config.Save("MemStickPlaylistChanged");
+						System_FullRestartApp("");
+					} else {
+						g_Config.sPerGameMemStickDirectory = previousValue;
+						g_Config.SaveGameConfig(gameID_, "");
+						RecreateViews();
+					}
+				}));
+		};
+
+		std::vector<std::string> displayNames;
+		std::vector<std::string> values;
+		displayNames.push_back(std::string(sy->T("Default - Follow Primary")));
+		values.push_back("");
+		for (const auto &path : g_Config.vMemStickPlaylist) {
+			if (path.empty()) continue;   // 双保险：跳过任何空字符串条目
+			displayNames.push_back(GetDisplay(path));
+			values.push_back(path);
+		}
+
+		auto memStickChoice = systemSettings->Add(new PopupMultiChoiceDynamic(
+			&g_Config.sPerGameMemStickDirectory,
+			sy->T("This game's memory stick folder"),
+			displayNames,
+			I18NCat::NONE,
+			screenManager(),
+			&values));
+		memStickChoice->OnChoice.Add([=](UI::EventParams &e) {
+			g_Config.SaveGameConfig(gameID_, "");
+			if (g_Config.sPerGameMemStickDirectory != prevPerGameMemStickDirectory_) {
+				PromptExitForMemStickChange(prevPerGameMemStickDirectory_);
+			}
+		});
+
+		auto addMemStick = systemSettings->Add(new Choice(sy->T("Add memory stick folder...")));
+		addMemStick->OnClick.Add([=](UI::EventParams &e) {
+			System_BrowseForFolder(GetRequesterToken(), sy->T("This game's memory stick folder"), Path(g_Config.sPerGameMemStickDirectory), [=](std::string_view value, int) {
+				if (value.empty()) return;
+				std::string uriStr = std::string(value);
+
+				if (std::find(g_Config.vMemStickPlaylist.begin(), g_Config.vMemStickPlaylist.end(), uriStr) == g_Config.vMemStickPlaylist.end()) {
+					g_Config.vMemStickPlaylist.push_back(uriStr);
+				}
+				g_Config.sPerGameMemStickDirectory = uriStr;
+				g_Config.SaveGameConfig(gameID_, "");
+				RecreateViews();
+
+				if (uriStr != prevPerGameMemStickDirectory_) {
+					PromptExitForMemStickChange(prevPerGameMemStickDirectory_);
+				}
+			});
+		});
+
+		// 逐条删除：删除非当前选中的条目不需要退出App；删除当前选中的条目才需要。
+		for (size_t i = 0; i < g_Config.vMemStickPlaylist.size(); ++i) {
+			std::string path = g_Config.vMemStickPlaylist[i];
+			if (path.empty()) continue;   // 双保险：跳过任何空字符串条目
+			auto entry = systemSettings->Add(new Choice(std::string(sy->T("Delete")) + ": " + GetDisplay(path)));
+			entry->OnClick.Add([=](UI::EventParams &e) {
+				screenManager()->push(new PromptScreen(gamePath_,
+					sy->T("Delete this memory stick folder from the list?"), sy->T("Yes"), sy->T("No"),
+					[=](bool yes) {
+						if (!yes) return;
+
+						bool wasActive = (g_Config.sPerGameMemStickDirectory == path);
+						auto &list = g_Config.vMemStickPlaylist;
+						list.erase(std::remove(list.begin(), list.end(), path), list.end());
+						g_Config.Save("RemoveMemStickPlaylistEntry");
+
+						if (wasActive) {
+							g_Config.sPerGameMemStickDirectory = "";
+							g_Config.SaveGameConfig(gameID_, "");
+							RecreateViews();
+							PromptExitForMemStickChange(prevPerGameMemStickDirectory_);
+						} else {
+							// 删的不是当前正在用的那条，不影响已挂载的 memstick，不用退出/重启。
+							RecreateViews();
+						}
+					}));
+			});
+		}
+	}
+
 	systemSettings->Add(new CheckBox(&g_Config.bMemStickInserted, sy->T("Memory Stick inserted")));
 	UI::PopupSliderChoice *sizeChoice = systemSettings->Add(new PopupSliderChoice(&g_Config.iMemStickSizeGB, 1, 32, 16, sy->T("Memory Stick size", "Memory Stick size"), screenManager(), "GB"));
 	sizeChoice->SetFormat("%d GB");

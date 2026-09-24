@@ -967,6 +967,7 @@ static const ConfigSetting controlSettings[] = {
 	ConfigSetting("AnimationBackground", SETTING(g_Config, bAnimationBackground), false, CfgFlag::PER_GAME),
 	ConfigSetting("BackgroundVideoWhitelist", SETTING(g_Config, sBackgroundVideoWhitelist), "", CfgFlag::PER_GAME),
 	ConfigSetting("BackgroundVideoPath", SETTING(g_Config, sBackgroundVideoPath), "", CfgFlag::PER_GAME),
+	ConfigSetting("PerGameMemStickDirectory", SETTING(g_Config, sPerGameMemStickDirectory), "", CfgFlag::PER_GAME),
 
 #if PPSSPP_PLATFORM(WINDOWS)
 	ConfigSetting("IgnoreWindowsKey", SETTING(g_Config, bIgnoreWindowsKey), false, CfgFlag::PER_GAME),
@@ -1074,6 +1075,7 @@ static const ConfigSetting networkSettings[] = {
 	ConfigSetting("DontDownloadInfraJson", SETTING(g_Config, bDontDownloadInfraJson), false, CfgFlag::DONT_SAVE),
 	ConfigSetting("proAdhocServerList", SETTING(g_Config, vCustomAdhocServerList), &emptyList, CfgFlag::DEFAULT),  // Customizable server list.
 	ConfigSetting("RelayAdhocServerList", SETTING(g_Config, vCustomAdhocServerListWithRelay), &emptyList, CfgFlag::DEFAULT),  // Customizable server list.
+	ConfigSetting("MemStickPlaylist", SETTING(g_Config, vMemStickPlaylist), &emptyList, CfgFlag::DEFAULT),
 	ConfigSetting("AdhocServerListUrl", SETTING(g_Config, sAdhocServerListUrl), "http://metadata.ppsspp.org/adhoc-servers.json", CfgFlag::DEFAULT),  // URL for the server list. Can be set to a local path too.
 	ConfigSetting("EnableNetworkChat", SETTING(g_Config, bEnableNetworkChat), false, CfgFlag::PER_GAME),
 	ConfigSetting("ChatButtonPosition", SETTING(g_Config, iChatButtonPosition), (int)ScreenEdgePosition::BOTTOM_LEFT, CfgFlag::PER_GAME),
@@ -1343,6 +1345,9 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 	}
 
 	ReadAllSettings(iniFile);
+	
+	// Prevent stale per-game memstick overrides in the main ini from bleeding into the next boot.
+	sPerGameMemStickDirectory.clear();
 
 	iRunCount++;
 

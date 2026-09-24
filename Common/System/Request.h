@@ -144,6 +144,10 @@ inline void System_RestartApp(std::string_view params) {
 	g_requestManager.MakeSystemRequest(SystemRequestType::RESTART_APP, NO_REQUESTER_TOKEN, nullptr, nullptr, params, "", 0);
 }
 
+inline void System_FullRestartApp(std::string_view params) {
+	g_requestManager.MakeSystemRequest(SystemRequestType::FULL_RESTART, NO_REQUESTER_TOKEN, nullptr, nullptr, params, "", 0);
+}
+
 inline void System_RecreateActivity() {
 	g_requestManager.MakeSystemRequest(SystemRequestType::RECREATE_ACTIVITY, NO_REQUESTER_TOKEN, nullptr, nullptr, "", "", 0);
 }

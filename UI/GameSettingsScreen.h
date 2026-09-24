@@ -93,6 +93,7 @@ private:
 	int iAlternateSpeedPercent2_ = 0;
 	int iAlternateSpeedPercentAnalog_ = 0;
 	int prevInflightFrames_ = -1;
+	std::string prevPerGameMemStickDirectory_;
 	bool enableReports_ = false;
 	bool enableReportsSet_ = false;
 	bool analogSpeedMapped_ = false;

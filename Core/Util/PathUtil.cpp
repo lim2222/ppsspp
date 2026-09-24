@@ -80,12 +80,29 @@ static Path PreferUpperCaseDir(const Path &parent, const char *upperCase, const 
 
 Path GetSysDirectory(PSPDirectories directoryType) {
 	const Path &memStickDirectory = g_Config.memStickDirectory;
+
+	auto usesOverride = [](PSPDirectories type) {
+		switch (type) {
+		case DIRECTORY_MEMSTICK_ROOT:
+		case DIRECTORY_PSP:
+		case DIRECTORY_GAME:
+		case DIRECTORY_EXDATA:
+			return true;
+		default:
+			return false;
+		}
+	};
+
+	Path effectiveMemStick = memStickDirectory;
+	if (usesOverride(directoryType) && !g_Config.sPerGameMemStickDirectory.empty()) {
+		effectiveMemStick = Path(g_Config.sPerGameMemStickDirectory);
+	}
+
 	Path pspDirectory;
-	if (!strcasecmp(memStickDirectory.GetFilename().c_str(), "PSP")) {
-		// Let's strip this off, to easily allow choosing a root directory named "PSP" on Android.
-		pspDirectory = memStickDirectory;
+	if (!strcasecmp(effectiveMemStick.GetFilename().c_str(), "PSP")) {
+		pspDirectory = effectiveMemStick;
 	} else {
-		pspDirectory = memStickDirectory / "PSP";
+		pspDirectory = effectiveMemStick / "PSP";
 	}
 
 	switch (directoryType) {
@@ -102,9 +119,9 @@ Path GetSysDirectory(PSPDirectories directoryType) {
 	case DIRECTORY_SYSTEM:
 		return pspDirectory / "SYSTEM";
 	case DIRECTORY_PAUTH:
-		return memStickDirectory / "PAUTH";  // This one's at the root...
+		return effectiveMemStick / "PAUTH";
 	case DIRECTORY_EXDATA:
-		return memStickDirectory / "EXDATA";  // This one's traditionally at the root...
+		return effectiveMemStick / "EXDATA";
 	case DIRECTORY_DUMP:
 		return pspDirectory / "SYSTEM/DUMP";
 	case DIRECTORY_SAVESTATE:
@@ -130,13 +147,11 @@ Path GetSysDirectory(PSPDirectories directoryType) {
 		return PreferUpperCaseDir(pspDirectory, "THEMES", "themes");
 	case DIRECTORY_NAND:
 		return pspDirectory / "NAND";
-
 	case DIRECTORY_MEMSTICK_ROOT:
-		return g_Config.memStickDirectory;
-		// Just return the memory stick root if we run into some sort of problem.
+		return effectiveMemStick;
 	default:
 		ERROR_LOG(Log::FileSystem, "Unknown directory type.");
-		return g_Config.memStickDirectory;
+		return effectiveMemStick;
 	}
 }
 

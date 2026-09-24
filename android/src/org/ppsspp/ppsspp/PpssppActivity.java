@@ -8,7 +8,9 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.AlarmManager;
 import android.app.ApplicationExitInfo;
+import android.app.PendingIntent;
 import android.app.UiModeManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -1716,6 +1718,22 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			shuttingDown = true;
 			recreate();
 			return true;
+		} else if (command.equals("full_restart")) {
+			Log.i(TAG, "full_restart: scheduling relaunch and killing process");
+			shuttingDown = true;
+
+			Intent restartIntent = new Intent(getApplicationContext(), PpssppActivity.class);
+			restartIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+			PendingIntent pendingIntent = PendingIntent.getActivity(
+				getApplicationContext(), 0, restartIntent,
+				PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
+			AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+			if (mgr != null) {
+				mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 300, pendingIntent);
+			}
+			finishAffinity();
+			Runtime.getRuntime().exit(0);
+			return true;			
 		} else if (command.equals("ask_permission") && params.equals("storage")) {
 			if (askForPermissions(permissionsForStorage, REQUEST_CODE_STORAGE_PERMISSION)) {
 				NativeApp.sendMessageFromJava("permission_pending", "storage");

@@ -541,7 +541,9 @@ public:
 	bool bAnimationBackground = false;
 	std::string sBackgroundVideoWhitelist;  // comma-separated enabled filenames
 	std::string sBackgroundVideoPath;       // Path or URI to background videos
-
+	std::string sPerGameMemStickDirectory;
+	std::vector<std::string> vMemStickPlaylist;
+	
 	// We also use the XInput settings as analog settings on other platforms like Android.
 	float fAnalogDeadzone;
 	float fAnalogInverseDeadzone;
