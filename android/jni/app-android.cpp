@@ -8,6 +8,7 @@
 
 #if PPSSPP_PLATFORM(ANDROID)
 
+#include <chrono>
 #include <cstdlib>
 #include <cstdint>
 
@@ -276,18 +277,56 @@ void System_ShowKeyboard() {
 
 void System_Vibrate(int length_ms) {
     char temp[32];
+    
     if (length_ms == HAPTIC_VIRTUAL_KEY) {
-            int amplitude = 80;
-            switch (g_Config.iHapticStrength) {
-                    case 1: amplitude = 40; break;
-                    case 2: amplitude = 140; break;
-                    case 3: amplitude = 255; break;
-            }
-            snprintf(temp, sizeof(temp), "%d,%d", 100, amplitude);
+        static uint64_t last_vibrate_time = 0;
+        
+        // Get current timestamp in milliseconds using standard C++11 chrono
+        uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+            
+        uint64_t delta = now - last_vibrate_time;
+
+        // CRITICAL FIX FOR BIG DON (DUAL-HAND HITS):
+        // When pressing two fingers simultaneously (Big Don/Ka), both touch events occur 
+        // within a few milliseconds. Sending a second vibrate command immediately cancels
+        // the first one on Android, cutting off the motor before it can build momentum.
+        // Ignore any second finger trigger within 35ms.
+        if (delta < 55) {
+            return;
+        }
+        last_vibrate_time = now;
+
+        // FAST ROLLING MODE: Short, crisp haptic feedback for fast single-finger rolling (>35ms and <75ms)
+        if (delta < 95) {
+            snprintf(temp, sizeof(temp), "%d,%d", 45, 200);
+            PushCommand("vibrate", temp);
+            return;
+        }
+
+        // SINGLE TAP / BIG DON MODE: Extended full-power vibration for deep penetration
+        int duration = 90;   // Extended duration to let motor fully ramp up and transfer energy
+        int amplitude = 255; // Full amplitude output
+
+        switch (g_Config.iHapticStrength) {
+            case 1: 
+                duration = 45; amplitude = 180; 
+                break; // Low strength
+            case 2: 
+                duration = 60; amplitude = 220; 
+                break; // Medium strength
+            case 3: 
+                duration = 95; amplitude = 255; 
+                break; // High strength (heavy impact feel)
+        }
+
+        snprintf(temp, sizeof(temp), "%d,%d", duration, amplitude);
+        PushCommand("vibrate", temp);
+
     } else {
-            snprintf(temp, sizeof(temp), "%d", length_ms);
+        snprintf(temp, sizeof(temp), "%d", length_ms);
+        PushCommand("vibrate", temp);
     }
-    PushCommand("vibrate", temp);
 }
 
 void System_LaunchUrl(LaunchUrlType urlType, std::string_view url) {
