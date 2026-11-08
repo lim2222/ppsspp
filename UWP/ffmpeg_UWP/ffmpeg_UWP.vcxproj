@@ -78,12 +78,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup Label="Sources">
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aac_ac3_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aac_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aacadtsdec.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aacdec.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aacps_float.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aacpsdsp_float.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aacsbr.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aactab.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\aandcttab.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\ac3tab.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\allcodecs.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\atrac.c" ObjectFileName="$(IntDir)libavcodec\" />
@@ -95,6 +98,8 @@
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\avpacket.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\bitstream.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\bitstream_filter.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\blockdsp.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\bswapdsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\cabac.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\codec_desc.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\dct.c" ObjectFileName="$(IntDir)libavcodec\" />
@@ -102,11 +107,19 @@
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\dct32_float.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\error_resilience.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\exif.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\faandct.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\faanidct.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\fdctdsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\fft_float.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\ffv1.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\ffv1enc.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\frame_thread_encoder.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\golomb.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h263.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h263_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h263data.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h263dec.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h263dsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h264.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h264_cabac.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h264_cavlc.c" ObjectFileName="$(IntDir)libavcodec\" />
@@ -124,13 +137,33 @@
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h264idct.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h264pred.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\h264qpel.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\hpeldsp.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\huffman.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\idctdsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\imdct15.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\imgconvert.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\intelh263dec.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\ituh263dec.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\jfdctfst.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\jfdctint.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\jpegtables.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\jrevdct.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\kbdwin.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\latm_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\lossless_videodsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mathtables.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mdct_float.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\me_cmp.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mjpegbdec.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mjpegdec.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg12.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg12data.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg12dec.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg4audio.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg4video.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg4video_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg4videodec.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpeg_er.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegaudio.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegaudio_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegaudiodata.c" ObjectFileName="$(IntDir)libavcodec\" />
@@ -140,16 +173,27 @@
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegaudiodsp_data.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegaudiodsp_fixed.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegaudiodsp_float.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegpicture.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegutils.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegvideo.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegvideo_motion.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegvideo_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegvideodata.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\mpegvideodsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\options.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\parser.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\pcm.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\pixblockdsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\profiles.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\pthread.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\pthread_frame.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\pthread_slice.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\qpeldsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\rangecoder.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\raw.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\rdft.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\resample.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\rl.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\sbrdsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\simple_idct.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\sinewin.c" ObjectFileName="$(IntDir)libavcodec\" />
@@ -159,6 +203,7 @@
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\videodsp.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\vorbis_parser.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavcodec\xiph.c" ObjectFileName="$(IntDir)libavcodec\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavcodec\xvididct.c" ObjectFileName="$(IntDir)libavcodec\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\aacdec.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\allformats.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\apetag.c" ObjectFileName="$(IntDir)libavformat\" />
@@ -187,8 +232,8 @@
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\mpegtsenc.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\mpegvideodec.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\mux.c" ObjectFileName="$(IntDir)libavformat\" />
-    <ClCompile Include="..\..\ext\ffmpeg\libavformat\oma.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\oggparsevorbis.c" ObjectFileName="$(IntDir)libavformat\" />
+    <ClCompile Include="..\..\ext\ffmpeg\libavformat\oma.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\omadec.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\options.c" ObjectFileName="$(IntDir)libavformat\" />
     <ClCompile Include="..\..\ext\ffmpeg\libavformat\pcm.c" ObjectFileName="$(IntDir)libavformat\" />

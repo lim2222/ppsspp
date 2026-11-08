@@ -3,12 +3,15 @@
 # update_vcxproj.py copies it into the VS projects. A component enabled in config.h needs its files
 # here.
 FFMPEG_SOURCES := \
+	libavcodec/aac_ac3_parser.c \
+	libavcodec/aac_parser.c \
 	libavcodec/aacadtsdec.c \
 	libavcodec/aacdec.c \
 	libavcodec/aacps_float.c \
 	libavcodec/aacpsdsp_float.c \
 	libavcodec/aacsbr.c \
 	libavcodec/aactab.c \
+	libavcodec/aandcttab.c \
 	libavcodec/ac3tab.c \
 	libavcodec/allcodecs.c \
 	libavcodec/atrac.c \
@@ -20,6 +23,8 @@ FFMPEG_SOURCES := \
 	libavcodec/avpacket.c \
 	libavcodec/bitstream.c \
 	libavcodec/bitstream_filter.c \
+	libavcodec/blockdsp.c \
+	libavcodec/bswapdsp.c \
 	libavcodec/cabac.c \
 	libavcodec/codec_desc.c \
 	libavcodec/dct.c \
@@ -27,11 +32,19 @@ FFMPEG_SOURCES := \
 	libavcodec/dct32_float.c \
 	libavcodec/error_resilience.c \
 	libavcodec/exif.c \
+	libavcodec/faandct.c \
+	libavcodec/faanidct.c \
+	libavcodec/fdctdsp.c \
 	libavcodec/fft_float.c \
 	libavcodec/ffv1.c \
 	libavcodec/ffv1enc.c \
 	libavcodec/frame_thread_encoder.c \
 	libavcodec/golomb.c \
+	libavcodec/h263.c \
+	libavcodec/h263_parser.c \
+	libavcodec/h263data.c \
+	libavcodec/h263dec.c \
+	libavcodec/h263dsp.c \
 	libavcodec/h264.c \
 	libavcodec/h264_cabac.c \
 	libavcodec/h264_cavlc.c \
@@ -49,13 +62,33 @@ FFMPEG_SOURCES := \
 	libavcodec/h264idct.c \
 	libavcodec/h264pred.c \
 	libavcodec/h264qpel.c \
+	libavcodec/hpeldsp.c \
+	libavcodec/huffman.c \
+	libavcodec/idctdsp.c \
 	libavcodec/imdct15.c \
 	libavcodec/imgconvert.c \
+	libavcodec/intelh263dec.c \
+	libavcodec/ituh263dec.c \
+	libavcodec/jfdctfst.c \
+	libavcodec/jfdctint.c \
+	libavcodec/jpegtables.c \
+	libavcodec/jrevdct.c \
 	libavcodec/kbdwin.c \
+	libavcodec/latm_parser.c \
+	libavcodec/lossless_videodsp.c \
 	libavcodec/mathtables.c \
 	libavcodec/mdct_float.c \
 	libavcodec/me_cmp.c \
+	libavcodec/mjpegbdec.c \
+	libavcodec/mjpegdec.c \
+	libavcodec/mpeg12.c \
+	libavcodec/mpeg12data.c \
+	libavcodec/mpeg12dec.c \
 	libavcodec/mpeg4audio.c \
+	libavcodec/mpeg4video.c \
+	libavcodec/mpeg4video_parser.c \
+	libavcodec/mpeg4videodec.c \
+	libavcodec/mpeg_er.c \
 	libavcodec/mpegaudio.c \
 	libavcodec/mpegaudio_parser.c \
 	libavcodec/mpegaudiodata.c \
@@ -65,16 +98,27 @@ FFMPEG_SOURCES := \
 	libavcodec/mpegaudiodsp_data.c \
 	libavcodec/mpegaudiodsp_fixed.c \
 	libavcodec/mpegaudiodsp_float.c \
+	libavcodec/mpegpicture.c \
+	libavcodec/mpegutils.c \
+	libavcodec/mpegvideo.c \
+	libavcodec/mpegvideo_motion.c \
+	libavcodec/mpegvideo_parser.c \
+	libavcodec/mpegvideodata.c \
+	libavcodec/mpegvideodsp.c \
 	libavcodec/options.c \
 	libavcodec/parser.c \
+	libavcodec/pcm.c \
+	libavcodec/pixblockdsp.c \
 	libavcodec/profiles.c \
 	libavcodec/pthread.c \
 	libavcodec/pthread_frame.c \
 	libavcodec/pthread_slice.c \
+	libavcodec/qpeldsp.c \
 	libavcodec/rangecoder.c \
 	libavcodec/raw.c \
 	libavcodec/rdft.c \
 	libavcodec/resample.c \
+	libavcodec/rl.c \
 	libavcodec/sbrdsp.c \
 	libavcodec/simple_idct.c \
 	libavcodec/sinewin.c \
@@ -84,6 +128,7 @@ FFMPEG_SOURCES := \
 	libavcodec/videodsp.c \
 	libavcodec/vorbis_parser.c \
 	libavcodec/xiph.c \
+	libavcodec/xvididct.c \
 	libavformat/aacdec.c \
 	libavformat/allformats.c \
 	libavformat/apetag.c \
@@ -112,8 +157,8 @@ FFMPEG_SOURCES := \
 	libavformat/mpegtsenc.c \
 	libavformat/mpegvideodec.c \
 	libavformat/mux.c \
-	libavformat/oma.c \
 	libavformat/oggparsevorbis.c \
+	libavformat/oma.c \
 	libavformat/omadec.c \
 	libavformat/options.c \
 	libavformat/pcm.c \
