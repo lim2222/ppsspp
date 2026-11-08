@@ -328,36 +328,44 @@ void System_Vibrate(int length_ms) {
         uint64_t delta = now - last_vibrate_time;
 
         // CRITICAL FIX FOR BIG DON (DUAL-HAND HITS):
-        // When pressing two fingers simultaneously (Big Don/Ka), both touch events occur 
-        // within a few milliseconds. Sending a second vibrate command immediately cancels
-        // the first one on Android, cutting off the motor before it can build momentum.
-        // Ignore any second finger trigger within 35ms.
-        if (delta < 55) {
+        // Prevent second finger from cancelling the ongoing rumble within 35ms.
+        if (delta < 35) {
             return;
         }
         last_vibrate_time = now;
 
-        // FAST ROLLING MODE: Short, crisp haptic feedback for fast single-finger rolling (>35ms and <75ms)
-        if (delta < 95) {
-            snprintf(temp, sizeof(temp), "%d,%d", 45, 200);
+        // SMOOTH ROLLING MODE: Completely removes "Clicky/Granular" friction.
+        // During rapid hits (< 85ms), we output a soft, ultra-low amplitude rumble (65-80) 
+        // with extended duration (60ms) so the motor operates smoothly without hard collisions.
+        if (delta < 85) {
+            int smooth_amplitude = 75; // Low power to stop physical clacking
+            int smooth_duration = 60;  // Long pulse to bridge the gap between rapid hits seamlessly
+            
+            switch (g_Config.iHapticStrength) {
+                case 1: smooth_amplitude = 55; smooth_duration = 50; break; // Ultra soft & silent
+                case 2: smooth_amplitude = 75; smooth_duration = 60; break; // Smooth fluid feel
+                case 3: smooth_amplitude = 105; smooth_duration = 65; break; // Gentle continuous rumble
+            }
+
+            snprintf(temp, sizeof(temp), "%d,%d", smooth_duration, smooth_amplitude);
             PushCommand("vibrate", temp);
             return;
         }
 
-        // SINGLE TAP / BIG DON MODE: Extended full-power vibration for deep penetration
-        int duration = 90;   // Extended duration to let motor fully ramp up and transfer energy
-        int amplitude = 255; // Full amplitude output
+        // SINGLE TAP / BIG DON MODE: Full-power 85ms vibration for deep, powerful single impact
+        int duration = 85;
+        int amplitude = 255;
 
         switch (g_Config.iHapticStrength) {
             case 1: 
                 duration = 45; amplitude = 180; 
-                break; // Low strength
+                break;
             case 2: 
                 duration = 60; amplitude = 220; 
                 break; // Medium strength
             case 3: 
-                duration = 95; amplitude = 255; 
-                break; // High strength (heavy impact feel)
+                duration = 85; amplitude = 255; 
+                break; // High strength (deep solid impact)
         }
 
         snprintf(temp, sizeof(temp), "%d,%d", duration, amplitude);
