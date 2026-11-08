@@ -58,6 +58,11 @@ val gitVersionCode =
 		commitsSinceTag
 
 dependencies {
+	implementation(platform("org.jetbrains.kotlin:kotlin-bom:1.8.22"))
+	constraints {
+		implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22")
+		implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22")
+	}
 	// appcompat 1.8.0 and later need minSdk 23.
 	implementation("androidx.appcompat:appcompat:1.7.1")
 	implementation("androidx.documentfile:documentfile:1.1.0")
