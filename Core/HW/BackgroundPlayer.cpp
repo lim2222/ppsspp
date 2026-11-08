@@ -109,22 +109,20 @@ bool BackgroundPlayer::LoadFromBackgroundFolder(const std::string &memstickRoot,
         playlist_.push_back(f.fullName.ToString());
     }
 #else
-    // 非 Android 平台使用传统 opendir
-    DIR *dir = opendir(folder.c_str());
-    if (!dir) {
+    // 非 Android 平台同样走 File::GetFilesInDir，避免依赖 opendir/dirent 这类 POSIX 接口
+    if (!File::Exists(Path(folder))) {
         INFO_LOG(Log::System, "BackgroundPlayer: no folder %s", folder.c_str());
         return false;
     }
 
-    const char *exts[] = {".mp4", ".mkv", ".webm", ".mov", ".avi"};
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        const char *name = entry->d_name;
-        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
-            continue;
-        }
+    std::vector<File::FileInfo> fileList;
+    File::GetFilesInDir(Path(folder), &fileList);
 
-        std::string lower = name;
+    const char *exts[] = {".mp4", ".mkv", ".webm", ".mov", ".avi"};
+    for (auto &f : fileList) {
+        if (f.isDirectory) continue;
+
+        std::string lower = f.name;
         for (auto &c : lower) c = tolower(c);
 
         bool isVideo = false;
@@ -133,18 +131,12 @@ bool BackgroundPlayer::LoadFromBackgroundFolder(const std::string &memstickRoot,
         }
         if (!isVideo) continue;
 
-        if (!whitelistSet.empty() && whitelistSet.find(name) == whitelistSet.end()) {
+        if (!whitelistSet.empty() && whitelistSet.find(f.name) == whitelistSet.end()) {
             continue;
         }
 
-        File::FileInfo info;
-        info.name = name;
-        info.fullName = Path(folder + info.name);
-        info.isDirectory = (entry->d_type == DT_DIR);
-        info.exists = true;
-        playlist_.push_back(info.fullName.ToString());
+        playlist_.push_back(f.fullName.ToString());
     }
-    closedir(dir);
 #endif
 
     std::sort(playlist_.begin(), playlist_.end());

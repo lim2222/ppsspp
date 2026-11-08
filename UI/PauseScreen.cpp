@@ -46,6 +46,7 @@
 #include "Core/RetroAchievements.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/sceDisplay.h"
+#include "Core/HLE/sceKernelModule.h"
 #include "Core/HLE/sceUmd.h"
 #include "Core/HLE/sceNet.h"
 #include "Core/HLE/sceNetInet.h"
@@ -82,7 +83,7 @@ void copyDeepLinkForPath(std::string_view filePath);
 void ShowMessageAfterSaveStateAction(SaveState::Status status, std::string_view message, std::string_view metadata) {
 	if (!message.empty()) {
 		g_OSD.Show(status == SaveState::Status::SUCCESS ? OSDType::MESSAGE_SUCCESS : OSDType::MESSAGE_ERROR,
-			message, metadata, status == SaveState::Status::SUCCESS ? 2.0 : 5.0);
+			message, metadata, status == SaveState::Status::SUCCESS ? 2.0 : 5.0, "savestateaction");
 	}
 }
 
@@ -96,6 +97,10 @@ public:
 	}
 
 	const char *tag() const override { return "ScreenshotView"; }
+	// Closed with DR_OK to load the slot (the pause screen does it), rather than after saving it.
+	bool LoadRequested() const {
+		return loadRequested_;
+	}
 
 protected:
 	bool FillVertical() const override { return false; }
@@ -128,8 +133,10 @@ protected:
 		}
 
 		grid->Add(new Choice(pa->T("Save State"), ImageID("I_FILE_SAVE")))->OnClick.Handle(this, &ScreenshotViewScreen::OnSaveState);
-		// We can unconditionally show the load state button, because you can only pop this dialog up if a state exists.
-		grid->Add(new Choice(pa->T("Load State"), ImageID("I_FOLDER_OPEN")))->OnClick.Handle(this, &ScreenshotViewScreen::OnLoadState);
+		// You can only pop this dialog up if a state exists. Hardcore mode doesn't allow loading, like in SaveSlotView.
+		if (!Achievements::HardcoreModeActive()) {
+			grid->Add(new Choice(pa->T("Load State"), ImageID("I_FOLDER_OPEN")))->OnClick.Handle(this, &ScreenshotViewScreen::OnLoadState);
+		}
 		grid->Add(new Choice(di->T("Delete"), ImageID("I_TRASHCAN")))->OnClick.Handle(this, &ScreenshotViewScreen::OnDeleteState);
 		if (undoButton) {
 			grid->Add(undoButton)->OnClick.Handle(this, &ScreenshotViewScreen::OnUndoState);
@@ -154,6 +161,7 @@ private:
 	std::string title_;
 	std::string customNameTemp_;
 	int slot_;
+	bool loadRequested_ = false;
 };
 
 void ScreenshotViewScreen::OnSaveState(UI::EventParams &e) {
@@ -170,12 +178,12 @@ void ScreenshotViewScreen::OnLoadState(UI::EventParams &e) {
 		if (g_Config.bConfirmLoadState) {
 			screenManager()->push(new LoadStateConfirmScreen(saveStatePrefix_, slot_, [this](bool result) {
 				if (result) {
-					SaveState::LoadSlot(saveStatePrefix_, slot_, &ShowMessageAfterSaveStateAction);
+					loadRequested_ = true;
 					TriggerFinish(DR_OK);
 				}
 			}));
 		} else {
-			SaveState::LoadSlot(saveStatePrefix_, slot_, &ShowMessageAfterSaveStateAction);
+			loadRequested_ = true;
 			TriggerFinish(DR_OK);
 		}
 	}
@@ -297,6 +305,7 @@ SaveSlotView::SaveSlotView(std::string_view saveStatePrefix, int slot, UI::Layou
 
 	saveStateButton_ = buttons->Add(new Button(pa->T("Save State"), new LinearLayoutParams(0.0, Gravity::G_VCENTER)));
 	saveStateButton_->OnClick.Handle(this, &SaveSlotView::OnSaveState);
+	saveStateButton_->SetRoundCorners();
 	fv->OnClick.Add([this](UI::EventParams &e) {
 		e.v = this;
 		OnScreenshotClicked.Trigger(e);
@@ -306,6 +315,7 @@ SaveSlotView::SaveSlotView(std::string_view saveStatePrefix, int slot, UI::Layou
 		if (!Achievements::HardcoreModeActive()) {
 			loadStateButton_ = buttons->Add(new Button(pa->T("Load State"), new LinearLayoutParams(0.0, Gravity::G_VCENTER)));
 			loadStateButton_->OnClick.Handle(this, &SaveSlotView::OnLoadState);
+			loadStateButton_->SetRoundCorners();
 		}
 
 		std::string nameStr = SaveState::GetSlotCustomName(saveStatePrefix_, slot_);
@@ -364,6 +374,11 @@ void GamePauseScreen::update() {
 
 	UIBaseDialogScreen::update();
 
+	if (stateLoadDone_ && *stateLoadDone_) {
+		stateLoadDone_.reset();
+		TriggerFinish(DR_CANCEL);
+	}
+
 	{
 		std::lock_guard<std::mutex> lock(finishNextFrameMutex_);
 		if (!firstFrame_ && g_controlMapper.PollPauseTrigger()) {
@@ -398,6 +413,14 @@ void GamePauseScreen::update() {
 	SetVRAppMode(VRAppMode::VR_MENU_MODE);
 }
 
+void GamePauseScreen::sendMessage(UIMessage message, const char *value) {
+	UIBaseDialogScreen::sendMessage(message, value);
+	if (message == UIMessage::SAVESTATE_SLOT_SAVED) {
+		// A save started before the screen opened has finished writing, so its slot needs updating.
+		RecreateViews();
+	}
+}
+
 GamePauseScreen::GamePauseScreen(const Path &filename, bool bootPending)
 	: UIBaseDialogScreen(filename), bootPending_(bootPending) {
 	// So we can tell if something blew up while on the pause screen.
@@ -415,6 +438,11 @@ GamePauseScreen::~GamePauseScreen() {
 }
 
 void GamePauseScreen::OnVKey(VirtKey virtualKeyCode, bool down) {
+	// The mapper keeps calling us while a settings screen is open on top. Escape there is both
+	// that screen's back key and the pause key, and must only close that screen.
+	if (!IsOnTop()) {
+		return;
+	}
 	// Simple de-bounce using createdTime_, just to be safe.
 	if (down && virtualKeyCode == VIRTKEY_PAUSE && time_now_d() > createdTime_ + 0.1) {
 		FinishNextFrame(DR_BACK);
@@ -435,8 +463,9 @@ void GamePauseScreen::CreateSavestateControls(UI::LinearLayout *leftColumnItems,
 			SaveSlotView *v = static_cast<SaveSlotView *>(e.v);
 			int slotNum = v->GetSlot();
 			auto doLoad = [this, slotNum]() {
-				SaveState::LoadSlot(saveStatePrefix_, slotNum, &ShowMessageAfterSaveStateAction);
-				FinishNextFrame(DR_CANCEL);
+				CloseAfterStateLoad([this, slotNum](SaveState::Callback callback) {
+					SaveState::LoadSlot(saveStatePrefix_, slotNum, callback);
+				});
 			};
 			if (g_Config.bConfirmLoadState) {
 				screenManager()->push(new LoadStateConfirmScreen(saveStatePrefix_, slotNum, [doLoad](bool result) {
@@ -466,35 +495,38 @@ void GamePauseScreen::CreateSavestateControls(UI::LinearLayout *leftColumnItems,
 
 	*extraRow = nullptr;
 
-	LinearLayout *buttonRow = new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(Margins(10, 0, 0, 10)));
+	LinearLayout *buttonRow = new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(Margins(0, 0, 0, 0)));
 	if (g_Config.bEnableStateUndo && !Achievements::HardcoreModeActive() && NetworkAllowSaveState()) {
-		UI::Choice *saveUndoButton = buttonRow->Add(new Choice(pa->T("Undo last save"), ImageID("I_NAVIGATE_BACK"), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT)));
+		UI::Button *saveUndoButton = buttonRow->Add(new Button(pa->T("Undo last save"), ImageID("I_NAVIGATE_BACK"), new LinearLayoutParams(WRAP_CONTENT, ITEM_HEIGHT)));
 		saveUndoButton->SetEnabled(SaveState::HasUndoLastSave(saveStatePrefix_));
 		saveUndoButton->OnClick.Add([this](UI::EventParams &e) {
 			SaveState::UndoLastSave(saveStatePrefix_);
 			RecreateViews();
 		});
 
-		UI::Choice *loadUndoButton = buttonRow->Add(new Choice(pa->T("Undo last load"), ImageID("I_NAVIGATE_BACK"), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT)));
+		UI::Button *loadUndoButton = buttonRow->Add(new Button(pa->T("Undo last load"), ImageID("I_NAVIGATE_BACK"), new LinearLayoutParams(WRAP_CONTENT, ITEM_HEIGHT)));
 		loadUndoButton->SetEnabled(SaveState::HasUndoLoad(saveStatePrefix_));
 		loadUndoButton->OnClick.Add([this](UI::EventParams &e) {
-			SaveState::UndoLoad(saveStatePrefix_, &ShowMessageAfterSaveStateAction);
-			TriggerFinish(DR_CANCEL);
+			CloseAfterStateLoad([this](SaveState::Callback callback) {
+				SaveState::UndoLoad(saveStatePrefix_, callback);
+			});
 		});
 	}
 
 	if (g_Config.iRewindSnapshotInterval > 0 && !Achievements::HardcoreModeActive() && NetworkAllowSaveState()) {
-		UI::Choice *rewindButton = buttonRow->Add(new Choice(pa->T("Rewind"), ImageID("I_REWIND"), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT)));
+		UI::Button *rewindButton = buttonRow->Add(new Button(pa->T("Rewind"), ImageID("I_REWIND"), new LinearLayoutParams(WRAP_CONTENT, ITEM_HEIGHT)));
 		rewindButton->SetEnabled(SaveState::CanRewind());
 		rewindButton->OnClick.Add([this](UI::EventParams &e) {
-			SaveState::Rewind(&ShowMessageAfterSaveStateAction);
-			TriggerFinish(DR_CANCEL);
+			CloseAfterStateLoad([](SaveState::Callback callback) {
+				SaveState::Rewind(callback);
+			});
 		});
 	}
 
 	if (buttonRow->GetNumSubviews() == 0) {
 		delete buttonRow;
 	} else {
+		buttonRow->ApplyRoundCorners();
 		*extraRow = buttonRow;
 	}
 }
@@ -512,9 +544,9 @@ UI::Margins GamePauseScreen::RootMargins() const {
 void GamePauseScreen::CreateViews() {
 	using namespace UI;
 
-	bool portrait = GetDeviceOrientation() == DeviceOrientation::Portrait;
+	const bool portrait = GetDeviceOrientation() == DeviceOrientation::Portrait;
 
-	Margins scrollMargins(0, 10, 0, 0);
+	Margins scrollMargins(12, 10, 12, 0);
 	Margins actionMenuMargins(0, 10, 15, 0);
 	auto gr = GetI18NCategory(I18NCat::GRAPHICS);
 	auto pa = GetI18NCategory(I18NCat::PAUSE);
@@ -539,7 +571,7 @@ void GamePauseScreen::CreateViews() {
 		} else {
 			title = g_paramSFO.GetValueString("TITLE");
 		}
-		TopBar *topBar = new TopBar(*screenManager()->getUIContext(), TopBarFlags::ContextMenuButton, title);
+		TopBar *topBar = new TopBar(*screenManager()->getUIContext(), TopBarFlags::ContextMenuButton, title, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(12, 12, 12, 0)));
 		root_->Add(topBar);
 
 		topBar->OnContextMenuClick.Add([this, portrait](UI::EventParams &e) {
@@ -562,7 +594,7 @@ void GamePauseScreen::CreateViews() {
 		// TODO: active subset?
 		saveDataScrollItems->Add(new GameAchievementSummaryView(0));
 
-		char buf[512];
+		char buf[256];
 		size_t sz = Achievements::GetRichPresenceMessage(buf, sizeof(buf));
 		if (sz != (size_t)-1) {
 			saveDataScrollItems->Add(new TextView(std::string_view(buf, sz), FLAG_WRAP_TEXT, true, new UI::LinearLayoutParams(Margins(5, 5))));
@@ -592,11 +624,13 @@ void GamePauseScreen::CreateViews() {
 				networkInfo->Add(new TextView(std::string(nw->T("Infrastructure server provided by:"))));
 				networkInfo->Add(new TextView(dnsConfig.revivalTeam));
 				if (!dnsConfig.revivalTeamURL.empty()) {
-					networkInfo->Add(new Button(dnsConfig.revivalTeamURL))->OnClick.Add([&dnsConfig](UI::EventParams &e) {
+					Button *visitUrl = networkInfo->Add(new Button(dnsConfig.revivalTeamURL));
+					visitUrl->OnClick.Add([&dnsConfig](UI::EventParams &e) {
 						if (!dnsConfig.revivalTeamURL.empty()) {
 							System_LaunchUrl(LaunchUrlType::BROWSER_URL, dnsConfig.revivalTeamURL.c_str());
 						}
 					});
+					visitUrl->SetRoundCorners();
 				}
 			}
 		} else if (NetAdhocctl_GetState() >= ADHOCCTL_STATE_CONNECTED) {
@@ -627,12 +661,12 @@ void GamePauseScreen::CreateViews() {
 
 	if (showSavestateControls) {
 		if (PSP_CoreParameter().compat.flags().SaveStatesNotRecommended) {
-			LinearLayout *horiz = new LinearLayout(ORIENT_HORIZONTAL);
-			saveDataScrollItems->Add(horiz);
+			LinearLayout *horiz = saveDataScrollItems->Add(new LinearLayout(ORIENT_HORIZONTAL, new LinearLayoutParams(FILL_PARENT, WRAP_CONTENT)));
 			horiz->Add(new NoticeView(NoticeLevel::WARN, pa->T("Using save states is not recommended in this game"), "", new LinearLayoutParams(1.0f)));
-			horiz->Add(new Button(di->T("More info")))->OnClick.Add([](UI::EventParams &e) {
+			horiz->Add(new Choice(di->T("More info"), ImageID("I_LINK_OUT_QUESTION"), new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT)))->OnClick.Add([](UI::EventParams &e) {
 				System_LaunchUrl(LaunchUrlType::BROWSER_URL, "https://www.ppsspp.org/docs/troubleshooting/save-state-time-warps");
 			});
+			horiz->ApplyRoundCorners();
 		}
 		LinearLayout *extraRow = nullptr;
 		CreateSavestateControls(saveDataScrollItems, &extraRow);
@@ -682,7 +716,6 @@ void GamePauseScreen::CreateViews() {
 	} else {
 		middleColumn = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(ITEM_HEIGHT, FILL_PARENT, Margins(0, 10, 0, 15)));
 		root_->Add(middleColumn);
-		middleColumn->SetSpacing(0.0f);
 
 		ViewGroup *buttonColumnScroll = new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(320, FILL_PARENT, actionMenuMargins));
 		buttonColumn = new LinearLayout(ORIENT_VERTICAL, new LinearLayoutParams(WRAP_CONTENT, WRAP_CONTENT));
@@ -690,55 +723,74 @@ void GamePauseScreen::CreateViews() {
 		root_->Add(buttonColumnScroll);
 	}
 
-	LinearLayout *rightColumnItems = new LinearLayout(ORIENT_VERTICAL);
+	LinearLayout *rightColumnItems = new ChoiceGroupList();
+	rightColumnItems->SetPadding(Margins(0, 0, 12, 12));
+	rightColumnItems->SetSpacing(12.0f);
+
 	buttonColumn->Add(rightColumnItems);
 
-	rightColumnItems->SetSpacing(0.0f);
-	if (getUMDReplacePermit()) {
-		rightColumnItems->Add(new Choice(pa->T("Switch UMD"), ImageID("I_UMD")))->OnClick.Add([this](UI::EventParams &) {
+	ChoiceGroup *topGroup = rightColumnItems->Add(new ChoiceGroup());
+	if (__KernelIsRunningVSH()) {
+		// The XMB notices discs coming and going by itself, like a PSP's.
+		if (__UmdIsInserted()) {
+			topGroup->Add(new Choice(pa->T("Eject UMD"), ImageID("I_UMD")))->OnClick.Add([this](UI::EventParams &) {
+				__UmdEject();
+				RecreateViews();
+			});
+		} else {
+			topGroup->Add(new Choice(pa->T("Insert UMD"), ImageID("I_UMD")))->OnClick.Add([this](UI::EventParams &) {
+				screenManager()->push(new UmdReplaceScreen(true));
+			});
+		}
+	} else if (getUMDReplacePermit()) {
+		topGroup->Add(new Choice(pa->T("Switch UMD"), ImageID("I_UMD")))->OnClick.Add([this](UI::EventParams &) {
 			screenManager()->push(new UmdReplaceScreen());
 		});
 	}
 
 	if (!portrait) {
-		Choice *continueChoice = rightColumnItems->Add(new Choice(pa->T("Continue"), ImageID("I_PLAY")));
+		Choice *continueChoice = topGroup->Add(new Choice(pa->T("Continue"), ImageID("I_PLAY")));
 		root_->SetDefaultFocusView(continueChoice);
 		continueChoice->OnClick.Handle<UIScreen>(this, &UIScreen::OnBack);
-		rightColumnItems->Add(new Spacer(20.0));
 	}
 
+	if (topGroup->GetNumSubviews() == 0) {
+		topGroup->SetVisibility(V_GONE);
+	}
+
+	ChoiceGroup *mainGroup = rightColumnItems->Add(new ChoiceGroup());
 	if (g_paramSFO.IsValid() && g_Config.HasGameConfig(g_paramSFO.GetDiscID())) {
-		rightColumnItems->Add(new Choice(pa->T("Game Settings"), ImageID("I_GEAR")))->OnClick.Handle(this, &GamePauseScreen::OnGameSettings);
+		mainGroup->Add(new Choice(pa->T("Game Settings"), ImageID("I_GEAR")))->OnClick.Handle(this, &GamePauseScreen::OnGameSettings);
 		auto pa = GetI18NCategory(I18NCat::PAUSE);
 		if (g_Config.HasGameConfig(g_paramSFO.GetValueString("DISC_ID"))) {
-			Choice *delGameConfig = rightColumnItems->Add(new Choice(pa->T("Delete Game Config"), ImageID("I_TRASHCAN")));
+			Choice *delGameConfig = mainGroup->Add(new Choice(pa->T("Delete Game Config"), ImageID("I_TRASHCAN")));
 			delGameConfig->OnClick.Handle(this, &GamePauseScreen::OnDeleteConfig);
 			delGameConfig->SetEnabled(!bootPending_);
 		}
 	} else if (PSP_CoreParameter().fileType != IdentifiedFileType::PPSSPP_GE_DUMP) {
-		rightColumnItems->Add(new Choice(pa->T("Settings"), ImageID("I_GEAR")))->OnClick.Handle(this, &GamePauseScreen::OnGameSettings);
-		Choice *createGameConfig = rightColumnItems->Add(new Choice(pa->T("Create Game Config"), ImageID("I_GEAR_STAR")));
+		mainGroup->Add(new Choice(pa->T("Settings"), ImageID("I_GEAR")))->OnClick.Handle(this, &GamePauseScreen::OnGameSettings);
+		Choice *createGameConfig = mainGroup->Add(new Choice(pa->T("Create Game Config"), ImageID("I_GEAR_STAR")));
 		createGameConfig->OnClick.Handle(this, &GamePauseScreen::OnCreateConfig);
 		createGameConfig->SetEnabled(!bootPending_);
 	}
 
 	if (g_Config.bAchievementsEnable && Achievements::HasAchievementsOrLeaderboards()) {
-		rightColumnItems->Add(new Choice(ac->T("Achievements"), ImageID("I_ACHIEVEMENT")))->OnClick.Add([this](UI::EventParams &e) {
+		mainGroup->Add(new Choice(ac->T("Achievements"), ImageID("I_ACHIEVEMENT")))->OnClick.Add([this](UI::EventParams &e) {
 			screenManager()->push(new RetroAchievementsListScreen(gamePath_));
 		});
 	}
 
-	rightColumnItems->Add(new Choice(gr->T("Display layout & effects"), ImageID("I_DISPLAY")))->OnClick.Add([this](UI::EventParams &) -> void {
+	mainGroup->Add(new Choice(gr->T("Display layout & effects"), ImageID("I_DISPLAY")))->OnClick.Add([this](UI::EventParams &) -> void {
 		screenManager()->push(new DisplayLayoutScreen(gamePath_));
 	});
 	if (g_Config.bShowTouchControls) {
-		rightColumnItems->Add(new Choice(co->T("Edit touch control layout"), ImageID("I_CONTROLLER")))->OnClick.Add([this](UI::EventParams &) -> void {
+		mainGroup->Add(new Choice(co->T("Edit touch control layout"), ImageID("I_CONTROLLER")))->OnClick.Add([this](UI::EventParams &) -> void {
 			screenManager()->push(new TouchControlLayoutScreen(gamePath_));
 		});
 	}
 
 	if (g_Config.bEnableCheats && PSP_CoreParameter().fileType != IdentifiedFileType::PPSSPP_GE_DUMP) {
-		rightColumnItems->Add(new Choice(pa->T("Cheats"), ImageID("I_CHEAT")))->OnClick.Add([this](UI::EventParams &e) {
+		mainGroup->Add(new Choice(pa->T("Cheats"), ImageID("I_CHEAT")))->OnClick.Add([this](UI::EventParams &e) {
 			screenManager()->push(new CwCheatScreen(gamePath_));
 		});
 	}
@@ -746,9 +798,8 @@ void GamePauseScreen::CreateViews() {
 	// TODO, also might be nice to show overall compat rating here?
 	// Based on their platform or even cpu/gpu/config.  Would add an API for it.
 	if (!portrait) {
-		AddExtraOptions(rightColumnItems);
+		AddExtraOptions(mainGroup);
 	}
-	rightColumnItems->Add(new Spacer(20.0));
 	Choice *exit;
 	if (g_Config.bPauseMenuExitsEmulator) {
 		auto di = GetI18NCategory(I18NCat::DIALOG);
@@ -756,6 +807,7 @@ void GamePauseScreen::CreateViews() {
 	} else {
 		exit = new Choice(pa->T("Exit to menu"), ImageID("I_EXIT"));
 	}
+	exit->SetRoundCorners();
 
 	if (portrait) {
 		UI::LinearLayout *exitRow = new UI::LinearLayout(ORIENT_HORIZONTAL, new UI::LinearLayoutParams(FILL_PARENT, WRAP_CONTENT, Margins(0, 0, 0, 0)));
@@ -764,35 +816,34 @@ void GamePauseScreen::CreateViews() {
 		exit->ReplaceLayoutParams(new UI::LinearLayoutParams(1.0f, Gravity::G_VCENTER));
 		Choice *continueChoice = new Choice(pa->T("Continue"), ImageID("I_PLAY"));
 		continueChoice->OnClick.Handle<UIScreen>(this, &UIScreen::OnBack);
+		continueChoice->SetRoundCorners();
 		root_->SetDefaultFocusView(continueChoice);
 		exitRow->Add(continueChoice);
 		continueChoice->ReplaceLayoutParams(new UI::LinearLayoutParams(1.0f, Gravity::G_VCENTER));
 	} else {
-		rightColumnItems->Add(exit);
+		rightColumnItems->Add(new ChoiceGroup())->Add(exit);
 	}
 
 	exit->OnClick.Handle(this, &GamePauseScreen::OnExit);
 	exit->SetEnabled(!bootPending_);
 
 	if (middleColumn) {
-		middleColumn->SetSpacing(portrait ? 8.0f : 0.0f);
+		middleColumn->SetSpacing(12.0f);
 		playButton_ = middleColumn->Add(new Choice(g_Config.bRunBehindPauseMenu ? ImageID("I_PAUSE_LINE") : ImageID("I_PLAY_LINE"), new LinearLayoutParams(64, 64)));
 		playButton_->OnClick.Add([this](UI::EventParams &e) {
 			g_Config.bRunBehindPauseMenu = !g_Config.bRunBehindPauseMenu;
 			playButton_->SetIconLeft(g_Config.bRunBehindPauseMenu ? ImageID("I_PAUSE_LINE") : ImageID("I_PLAY_LINE"));
 		});
+		playButton_->SetRoundCorners();
 
 		bool mustRunBehind = MustRunBehind();
 		playButton_->SetEnabled(!mustRunBehind);
-
-		if (!portrait) {
-			middleColumn->Add(new Spacer(20.0f));
-		}
 
 		Choice *infoButton = middleColumn->Add(new Choice(ImageID("I_INFO"), new LinearLayoutParams(64, 64)));
 		infoButton->OnClick.Add([this](UI::EventParams &e) {
 			screenManager()->push(new GameScreen(gamePath_, true));
 		});
+		infoButton->SetRoundCorners();
 
 		if (System_GetPropertyBool(SYSPROP_CAN_RESTRICT_ORIENTATION)) {
 			AddRotationPicker(screenManager(), middleColumn, false);
@@ -803,6 +854,7 @@ void GamePauseScreen::CreateViews() {
 			menuButton->OnClick.Add([this, menuButton, portrait](UI::EventParams &e) {
 				ShowContextMenu(menuButton, portrait);
 			});
+			menuButton->SetRoundCorners();
 		}
 	} else {
 		playButton_ = nullptr;
@@ -856,10 +908,26 @@ void GamePauseScreen::OnState(UI::EventParams &e) {
 	TriggerFinish(DR_CANCEL);
 }
 
+void GamePauseScreen::CloseAfterStateLoad(const std::function<void(SaveState::Callback)> &load) {
+	// Shared, so a callback arriving after the menu is gone (closed some other way) is harmless.
+	auto done = std::make_shared<std::atomic<bool>>(false);
+	stateLoadDone_ = done;
+	load([done](SaveState::Status status, std::string_view message, std::string_view metadata) {
+		ShowMessageAfterSaveStateAction(status, message, metadata);
+		*done = true;
+	});
+}
+
 void GamePauseScreen::dialogFinished(const Screen *dialog, DialogResult dr) {
 	std::string tag = dialog->tag();
 	if (tag == "ScreenshotView") {
-		if (dr == DR_OK) {
+		const ScreenshotViewScreen *view = static_cast<const ScreenshotViewScreen *>(dialog);
+		if (dr == DR_OK && view->LoadRequested()) {
+			const int slot = view->GetSlot();
+			CloseAfterStateLoad([this, slot](SaveState::Callback callback) {
+				SaveState::LoadSlot(saveStatePrefix_, slot, callback);
+			});
+		} else if (dr == DR_OK) {
 			FinishNextFrame(DR_BACK);
 		} else if (dr != DR_CANCEL && dr != DR_BACK) {
 			// Just go back to the pause menu, but refresh the savestate thumbnails in case something changed.

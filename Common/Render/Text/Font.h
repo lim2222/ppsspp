@@ -21,7 +21,8 @@ ENUM_CLASS_BITOPS(FontStyleFlags);
 
 enum class FontFamily : u8 {
 	SansSerif = 1,
-	Fixed = 2,
+	SansSerifWide = 2,
+	Fixed = 3,
 };
 
 struct FontStyle {
@@ -32,6 +33,10 @@ struct FontStyle {
 	FontFamily family = FontFamily::SansSerif;
 	FontStyleFlags flags = FontStyleFlags::Default;
 };
+
+inline constexpr bool operator==(const FontStyle &a, const FontStyle &b) {
+	return a.family == b.family && a.sizePts == b.sizePts && a.flags == b.flags;
+}
 
 inline constexpr bool operator<(const FontStyle &a, const FontStyle &b) {
 	if (a.family != b.family)

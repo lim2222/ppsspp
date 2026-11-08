@@ -7,7 +7,6 @@
 #include "Common/System/System.h"
 #include "Common/Log.h"
 
-#include "Core/Config.h"
 #include "Core/KeyMap.h"
 #include "SDL/SDLJoystick.h"
 
@@ -92,7 +91,7 @@ void SDLJoystick::setUpController(SDL_JoystickID deviceID) {
 			KeyMap::NotifyPadConnected((InputDeviceID)deviceID, std::string(pszGUID) + ": " + SDL_GetGamepadName(controller));
 			char *mapping = SDL_GetGamepadMapping(controller);
 			if (!mapping) {
-				WARN_LOG(Log::System, "Could not find mapping in SDL2 controller database");
+				WARN_LOG(Log::System, "Could not find mapping in SDL controller database");
 			} else {
 				INFO_LOG(Log::System, "SUCCESS, mapping is: %s", mapping);
 				SDL_free(mapping);

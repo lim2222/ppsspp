@@ -252,8 +252,8 @@ static bool g_disableHLELatched;
 static DisableHLEFlags g_unavailableDisableFlags = (DisableHLEFlags)0;
 
 // Process compat flags.
-static DisableHLEFlags ComputeDisableHLEFlags() {
-	DisableHLEFlags flags = (DisableHLEFlags)g_Config.iDisableHLE | AlwaysDisableHLEFlags();
+static DisableHLEFlags ComputeDisableHLEFlags(DisableHLEFlags alwaysDisabled = AlwaysDisableHLEFlags()) {
+	DisableHLEFlags flags = (DisableHLEFlags)g_Config.iDisableHLE | alwaysDisabled;
 	if (PSP_CoreParameter().compat.flags().DisableHLESceFont) {
 		flags |= DisableHLEFlags::sceFont;
 	}
@@ -284,6 +284,20 @@ static DisableHLEFlags GetDisableHLEFlags() {
 
 DisableHLEFlags GetEffectiveDisableHLEFlags() {
 	return GetDisableHLEFlags();
+}
+
+bool HLEFallBackToHLE(DisableHLEFlags flag) {
+	if (!(GetDisableHLEFlags() & flag)) {
+		return false;
+	}
+	// The latched flags are what a savestate records, so a state made after this restores the HLE too.
+	g_effectiveDisableHLE &= ~flag;
+	for (size_t i = 0; i < ARRAY_SIZE(g_moduleMeta); i++) {
+		if (g_moduleMeta[i].disableFlag == flag && g_moduleMeta[i].importName) {
+			KernelReimportLibrary(g_moduleMeta[i].importName);
+		}
+	}
+	return true;
 }
 
 // Note: name is the modname from prx, not the export module name!
@@ -472,6 +486,12 @@ void HLEDoState(PointerWrap &p) {
 			g_effectiveDisableHLE = (DisableHLEFlags)disableHLE;
 			g_disableHLELatched = true;
 		}
+	} else if (p.mode == p.MODE_READ) {
+		// Older states didn't save the flags. They were all made before any module graduated past
+		// these, so resolving their imports against today's defaults would leave the ones since
+		// (sceMpeg, sceFont, the leaf libraries...) as unresolved stubs.
+		g_effectiveDisableHLE = ComputeDisableHLEFlags(DisableHLEFlags::scePsmf | DisableHLEFlags::scePsmfPlayer | DisableHLEFlags::sceCcc);
+		g_disableHLELatched = true;
 	}
 
 	// Can't be inside a syscall when saving state, reset this so errors aren't misleading.
@@ -486,16 +506,31 @@ void HLEDoState(PointerWrap &p) {
 	if (s >= 2) {
 		int actions = (int)mipsCallActions.size();
 		Do(p, actions);
-		if (actions != (int)mipsCallActions.size()) {
-			mipsCallActions.resize(actions);
+		if (p.mode == p.MODE_READ) {
+			for (PSPAction *action : mipsCallActions) {
+				delete action;
+			}
+			mipsCallActions.clear();
+			// Each action takes at least its type id.
+			if (actions < 0 || (size_t)actions > p.Remaining() / sizeof(int)) {
+				p.SetError(p.ERROR_FAILURE);
+				return;
+			}
+			mipsCallActions.resize(actions, nullptr);
 		}
 
 		for (auto &action : mipsCallActions) {
 			int actionTypeID = action != nullptr ? action->actionTypeID : -1;
 			Do(p, actionTypeID);
 			if (actionTypeID != -1) {
-				if (p.mode == p.MODE_READ)
+				if (p.mode == p.MODE_READ) {
 					action = __KernelCreateAction(actionTypeID);
+					if (!action) {
+						ERROR_LOG(Log::SaveState, "Unable to load state: unknown action type %d", actionTypeID);
+						p.SetError(p.ERROR_FAILURE);
+						return;
+					}
+				}
 				action->DoState(p);
 			}
 		}
@@ -556,6 +591,13 @@ int GetHLEFuncIndexByNib(int moduleIndex, u32 nib) {
 	for (int i = 0; i < module.numFunctions; i++) {
 		if (module.funcTable[i].ID == nib)
 			return i;
+	}
+	const u32 alias = GetHLENidAlias(module.name, nib);
+	if (alias != 0) {
+		for (int i = 0; i < module.numFunctions; i++) {
+			if (module.funcTable[i].ID == alias)
+				return i;
+		}
 	}
 	return -1;
 }
@@ -646,7 +688,7 @@ bool WriteHLESyscall(std::string_view moduleName, u32 nib, u32 address) {
 	_dbg_assert_(Memory::IsValid4AlignedAddress(address));
 	if (nib == 0)
 	{
-		WARN_LOG_REPORT(Log::HLE, "Wrote patched out nid=0 syscall (%.*s)", (int)moduleName.size(), moduleName.data());
+		WARN_LOG(Log::HLE, "Wrote patched out nid=0 syscall (%.*s)", (int)moduleName.size(), moduleName.data());
 		Memory::WriteUnchecked_U32(MIPS_MAKE_JR_RA(), address); //patched out?
 		Memory::WriteUnchecked_U32(MIPS_MAKE_NOP(), address+4); //patched out?
 		return true;
@@ -660,7 +702,7 @@ bool WriteHLESyscall(std::string_view moduleName, u32 nib, u32 address) {
 	}
 	else
 	{
-		ERROR_LOG_REPORT(Log::HLE, "Unable to write unknown syscall: %.*s/%08x", (int)moduleName.size(), moduleName.data(), nib);
+		ERROR_LOG(Log::HLE, "Unable to write unknown syscall: %.*s/%08x", (int)moduleName.size(), moduleName.data(), nib);
 		return false;
 	}
 }
@@ -738,6 +780,9 @@ u32 hleDelayResult(u32 result, const char *reason, int usec) {
 
 	if (!__KernelIsDispatchEnabled()) {
 		WARN_LOG(Log::HLE, "%s: Dispatch disabled, not delaying HLE result (right thing to do?)", g_stackSize ? g_stack[0]->name : "?");
+	} else if (__IsInInterrupt()) {
+		// Nothing can wait in an interrupt handler. The wait would go to the idle thread it runs on.
+		WARN_LOG(Log::HLE, "%s: In interrupt, not delaying HLE result", g_stackSize ? g_stack[0]->name : "?");
 	} else {
 		SceUID thread = __KernelGetCurThread();
 		if (KernelIsThreadWaiting(thread))
@@ -754,6 +799,8 @@ u64 hleDelayResult(u64 result, const char *reason, int usec) {
 	// _dbg_assert_(g_stackSize == 0);
 	if (!__KernelIsDispatchEnabled()) {
 		WARN_LOG(Log::HLE, "%s: Dispatch disabled, not delaying HLE result (right thing to do?)", g_stack[0]->name ? g_stack[0]->name : "N/A");
+	} else if (__IsInInterrupt()) {
+		WARN_LOG(Log::HLE, "%s: In interrupt, not delaying HLE result", g_stack[0]->name ? g_stack[0]->name : "N/A");
 	} else {
 		// TODO: Defer this, so you can call this multiple times, in case of syscalls calling syscalls? Although, return values are tricky.
 		SceUID thread = __KernelGetCurThread();
@@ -764,6 +811,17 @@ u64 hleDelayResult(u64 result, const char *reason, int usec) {
 		__KernelWaitCurThread(WAITTYPE_HLEDELAY, 1, (u32)result, 0, false, reason);
 	}
 	return result;
+}
+
+// Ends a thread's 32-bit hleDelayResult() early. Returns whether it was in one.
+bool hleWakeDelayedThread(int threadID) {
+	u32 error;
+	if (__KernelGetWaitID(threadID, WAITTYPE_HLEDELAY, error) != 1 || error != 0) {
+		return false;
+	}
+	CoreTiming::UnscheduleEvent(delayedResultEvent, (u64)(u32)threadID);
+	__KernelResumeThreadFromWait(threadID, __KernelGetWaitValue(threadID, error));
+	return true;
 }
 
 void hleEatCycles(int cycles) {
@@ -842,25 +900,24 @@ static void hleFlushCalls(MIPSState *mips) {
 	}
 	enqueuedMipsCalls.clear();
 
-	DEBUG_LOG(Log::HLE, "Executing HLE mips call at %08x, sp=%08x", currentMIPS->pc, sp);
+	DEBUG_LOG(Log::HLE, "Executing HLE mips call at %08x, sp=%08x", mips->pc, sp);
 }
 
 // This is a HLE function.
-void HLEReturnFromMipsCall() {
-	u32 &sp = currentMIPS->r[MIPS_REG_SP];
+void HLEReturnFromMipsCall(MIPSState *mips) {
+	u32 &sp = mips->r[MIPS_REG_SP];
 	PSPPointer<HLEMipsCallStack> stackData;
 
 	// At this point, we may have another mips call to run, or be at the end...
 	stackData.ptr = sp;
 
 	if ((stackData->nextOff & 0x0000000F) != 0 || !Memory::IsValidAddress(sp + stackData->nextOff)) {
-		ERROR_LOG(Log::HLE, "Corrupt stack on HLE mips call return: %08x", stackData->nextOff);
-		Core_UpdateState(CORE_RUNTIME_ERROR);
+		Core_HLEError(StringFromFormat("Corrupt stack on HLE mips call return: %08x", stackData->nextOff));
 		hleNoLogVoid();
 		return;
 	}
 
-	if (stackData->actionIndex != 0xFFFFFFFF && stackData->actionIndex < (u32)mipsCallActions.size()) {
+	if (stackData->actionIndex != 0xFFFFFFFF && stackData->actionIndex < (u32)mipsCallActions.size() && mipsCallActions[stackData->actionIndex] != nullptr) {
 		PSPAction *&action = mipsCallActions[stackData->actionIndex];
 		VERBOSE_LOG(Log::HLE, "Executing action for HLE mips call at %08x, sp=%08x", stackData->func, sp);
 
@@ -871,8 +928,7 @@ void HLEReturnFromMipsCall() {
 		}
 
 		if (finalMarker->nextOff != 0xFFFFFFFF) {
-			ERROR_LOG(Log::HLE, "Corrupt stack on HLE mips call return action: %08x", finalMarker->nextOff);
-			Core_UpdateState(CORE_RUNTIME_ERROR);
+			Core_HLEError(StringFromFormat("Corrupt stack on HLE mips call return action: %08x", finalMarker->nextOff));
 			hleNoLogVoid();
 			return;
 		}
@@ -895,9 +951,9 @@ void HLEReturnFromMipsCall() {
 
 	if (stackData->nextOff == 0xFFFFFFFF) {
 		// We're done.  Grab the HLE result's v0/v1 and return from the syscall.
-		currentMIPS->pc = stackData->ra;
-		currentMIPS->r[MIPS_REG_V0] = stackData->v0;
-		currentMIPS->r[MIPS_REG_V1] = stackData->v1;
+		mips->pc = stackData->ra;
+		mips->r[MIPS_REG_V0] = stackData->v0;
+		mips->r[MIPS_REG_V1] = stackData->v1;
 
 		sp += sizeof(HLEMipsCallStack);
 
@@ -909,43 +965,43 @@ void HLEReturnFromMipsCall() {
 			mipsCallActions.clear();
 		}
 
-		VERBOSE_LOG(Log::HLE, "Finished HLE mips calls, v0=%08x, sp=%08x", currentMIPS->r[MIPS_REG_V0], sp);
+		VERBOSE_LOG(Log::HLE, "Finished HLE mips calls, v0=%08x, sp=%08x", mips->r[MIPS_REG_V0], sp);
 		hleNoLogVoid();
 		return;
 	}
 
 	// Alright, we have another to call.
 	hleSkipDeadbeef();
-	currentMIPS->pc = stackData->func;
-	currentMIPS->r[MIPS_REG_RA] = HLEMipsCallReturnAddress();
+	mips->pc = stackData->func;
+	mips->r[MIPS_REG_RA] = HLEMipsCallReturnAddress();
 	for (int i = 0; i < (int)stackData->argc; i++) {
 		// The check at the start of the function should be enough to use an unchecked read (well, kinda..)
-		currentMIPS->r[MIPS_REG_A0 + i] = Memory::ReadUnchecked_U32(sp + sizeof(HLEMipsCallStack) + i * sizeof(u32));
+		mips->r[MIPS_REG_A0 + i] = Memory::ReadUnchecked_U32(sp + sizeof(HLEMipsCallStack) + i * sizeof(u32));
 	}
-	DEBUG_LOG(Log::HLE, "Executing next HLE mips call at %08x, sp=%08x", currentMIPS->pc, sp);
+	DEBUG_LOG(Log::HLE, "Executing next HLE mips call at %08x, sp=%08x", mips->pc, sp);
 	hleNoLogVoid();
 }
 
 const static u32 deadbeefRegs[12] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
-inline static void SetDeadbeefRegs()
+inline static void SetDeadbeefRegs(MIPSState *mips)
 {
 	// Not exactly the same, but any time a syscall happens, it should clear ll.
-	currentMIPS->llBit = 0;
+	mips->llBit = 0;
 
 	if (g_Config.bSkipDeadbeefFilling)
 		return;
 
-	currentMIPS->r[MIPS_REG_COMPILER_SCRATCH] = 0xDEADBEEF;
+	mips->r[MIPS_REG_COMPILER_SCRATCH] = 0xDEADBEEF;
 	// Set all the arguments and temp regs. TODO: Use SIMD to just do three writes.
-	memcpy(&currentMIPS->r[MIPS_REG_A0], deadbeefRegs, sizeof(deadbeefRegs));
-	currentMIPS->r[MIPS_REG_T8] = 0xDEADBEEF;
-	currentMIPS->r[MIPS_REG_T9] = 0xDEADBEEF;
+	memcpy(&mips->r[MIPS_REG_A0], deadbeefRegs, sizeof(deadbeefRegs));
+	mips->r[MIPS_REG_T8] = 0xDEADBEEF;
+	mips->r[MIPS_REG_T9] = 0xDEADBEEF;
 
-	currentMIPS->lo = 0xDEADBEEF;
-	currentMIPS->hi = 0xDEADBEEF;
+	mips->lo = 0xDEADBEEF;
+	mips->hi = 0xDEADBEEF;
 }
 
-static void hleFinishSyscall(const HLEFunction *info) {
+static void hleFinishSyscall(MIPSState *mips, const HLEFunction *info) {
 	if (hleAfterSyscall & HLE_SPLIT_SYSCALL_OVER_GE) {
 		hleAfterSyscall &= ~HLE_SPLIT_SYSCALL_OVER_GE;
 		hleAfterSyscall |= HLE_SPLIT_SYSCALL_PART2;
@@ -957,20 +1013,20 @@ static void hleFinishSyscall(const HLEFunction *info) {
 
 	if (hleAfterSyscall & HLE_SPLIT_SYSCALL_PART2) {
 		// Eat the extra cycle we added above.
-		hleEatCycles(splitSyscallEatCycles + 1);
+		mips->downcount -= splitSyscallEatCycles + 1;
 		// Make sure to zero it so it's not accidentally re-used.
 		splitSyscallEatCycles = 0;
 	}
 
 	if (hleAfterSyscall & HLE_AFTER_CORETIMING_FORCE_CHECK) {
-		CoreTiming::ForceCheck(currentMIPS);
+		CoreTiming::ForceCheck(mips);
 	}
 
 	if ((hleAfterSyscall & HLE_AFTER_SKIP_DEADBEEF) == 0)
-		SetDeadbeefRegs();
+		SetDeadbeefRegs(mips);
 
 	if ((hleAfterSyscall & HLE_AFTER_QUEUED_CALLS) != 0)
-		hleFlushCalls(currentMIPS);
+		hleFlushCalls(mips);
 	if ((hleAfterSyscall & HLE_AFTER_CURRENT_CALLBACKS) != 0 && (hleAfterSyscall & HLE_AFTER_RESCHED_CALLBACKS) == 0)
 		__KernelForceCallbacks();
 
@@ -995,8 +1051,8 @@ static void hleFinishSyscall(const HLEFunction *info) {
 	hleAfterSyscallReschedReason = 0;
 }
 
-void hleFinishSyscallAfterGe() {
-	hleFinishSyscall(nullptr);
+void hleFinishSyscallAfterGe(MIPSState *mips) {
+	hleFinishSyscall(mips, nullptr);
 }
 
 static void UpdateSyscallStats(int modulenum, int funcnum, double total) {
@@ -1028,7 +1084,7 @@ static void UpdateSyscallStats(int modulenum, int funcnum, double total) {
 	}
 }
 
-static void CallSyscallWithFlags(const HLEFunction *info) {
+static void CallSyscallWithFlags(MIPSState *mips, const HLEFunction *info) {
 	// _dbg_assert_(g_stackSize == 0);
 	g_stackSize = 0;
 
@@ -1037,14 +1093,14 @@ static void CallSyscallWithFlags(const HLEFunction *info) {
 		g_stack[0] = info;
 		g_stackSize = 1;
 	}
-	g_syscallPC = currentMIPS->pc;
+	g_syscallPC = mips->pc;
 
 	const u32 flags = info->flags;
 
 	if (flags & HLE_CLEAR_STACK_BYTES) {
 		u32 stackStart = __KernelGetCurThreadStackStart();
-		if (currentMIPS->r[MIPS_REG_SP] - info->stackBytesToClear >= stackStart) {
-			Memory::Memset(currentMIPS->r[MIPS_REG_SP] - info->stackBytesToClear, 0, info->stackBytesToClear, "HLEStackClear");
+		if (mips->r[MIPS_REG_SP] - info->stackBytesToClear >= stackStart) {
+			Memory::Memset(mips->r[MIPS_REG_SP] - info->stackBytesToClear, 0, info->stackBytesToClear, "HLEStackClear");
 		}
 	}
 
@@ -1053,7 +1109,7 @@ static void CallSyscallWithFlags(const HLEFunction *info) {
 	} else if ((flags & HLE_NOT_IN_INTERRUPT) && __IsInInterrupt()) {
 		RETURN(hleLogDebug(Log::HLE, SCE_KERNEL_ERROR_ILLEGAL_CONTEXT, "in interrupt"));
 	} else {
-		info->func();
+		info->func(mips);
 	}
 
 	// Now, g_stackSize should be back to 0. Enable this for "pedantic mode", will find a lot of problems.
@@ -1061,14 +1117,14 @@ static void CallSyscallWithFlags(const HLEFunction *info) {
 	// _dbg_assert_(g_stackSize == 0);
 
 	if (hleAfterSyscall != HLE_AFTER_NOTHING)
-		hleFinishSyscall(info);
+		hleFinishSyscall(mips, info);
 	else
-		SetDeadbeefRegs();
+		SetDeadbeefRegs(mips);
 
 	g_stackSize = 0;
 }
 
-static void CallSyscallWithoutFlags(const HLEFunction *info) {
+static void CallSyscallWithoutFlags(MIPSState *mips, const HLEFunction *info) {
 	// _dbg_assert_(g_stackSize == 0);
 	g_stackSize = 0;
 
@@ -1077,18 +1133,18 @@ static void CallSyscallWithoutFlags(const HLEFunction *info) {
 		g_stack[0] = info;
 		g_stackSize = 1;
 	}
-	g_syscallPC = currentMIPS->pc;
+	g_syscallPC = mips->pc;
 
-	info->func();
+	info->func(mips);
 
 	// Now, g_stackSize should be back to 0. Enable this for "pedantic mode", will find a lot of problems.
 	// Check g_stack[0] in the debugger.
 	// _dbg_assert_(g_stackSize == 0);
 
 	if (hleAfterSyscall != HLE_AFTER_NOTHING)
-		hleFinishSyscall(info);
+		hleFinishSyscall(mips, info);
 	else
-		SetDeadbeefRegs();
+		SetDeadbeefRegs(mips);
 
 	g_stackSize = 0;
 }
@@ -1154,7 +1210,7 @@ void hleSetFlipTime(double t) {
 	hleFlipTime = t;
 }
 
-void CallSyscallWithPC(MIPSOpcode op, u32 pc) {
+void CallSyscallWithPC(MIPSState *mips, MIPSOpcode op, u32 pc) {
 	PROFILE_THIS_SCOPE("syscall");
 	const bool collectStats = g_coreCollectDebugStats;
 	double start = 0.0;
@@ -1171,15 +1227,15 @@ void CallSyscallWithPC(MIPSOpcode op, u32 pc) {
 
 	if (info->func) {
 		if (op == g_idleOp)
-			info->func();
+			info->func(mips);
 		else if (info->flags != 0)
-			CallSyscallWithFlags(info);
+			CallSyscallWithFlags(mips, info);
 		else
-			CallSyscallWithoutFlags(info);
+			CallSyscallWithoutFlags(mips, info);
 	} else {
 		// We haven't incremented the stack yet.
 		RETURN(SCE_KERNEL_ERROR_LIBRARY_NOT_YET_LINKED);
-		ERROR_LOG_REPORT(Log::HLE, "Unimplemented HLE function %s", info->name ? info->name : "(\?\?\?)");
+		ERROR_LOG(Log::HLE, "Unimplemented HLE function %s", info->name ? info->name : "(\?\?\?)");
 	}
 
 	if (collectStats) {
@@ -1195,11 +1251,11 @@ void CallSyscallWithPC(MIPSOpcode op, u32 pc) {
 	}
 }
 
-void CallSyscall(MIPSOpcode op) {
-	CallSyscallWithPC(op, 0);
+void CallSyscall(MIPSState *mips, MIPSOpcode op) {
+	CallSyscallWithPC(mips, op, 0);
 }
 
-void CallSyscallUnresolvedAtPC(u32 pc) {
+void CallSyscallUnresolvedAtPC(MIPSState *mips, u32 pc) {
 	LogBadSyscallAtPC(pc, false);
 	// Same as the !info path in CallSyscallWithPC - the call has to leave an error in v0,
 	// otherwise the caller sees a stale value and thinks the unresolved import succeeded.
@@ -1225,16 +1281,16 @@ void hlePushFuncDesc(std::string_view module, std::string_view funcName) {
 // Fetches one word of a variadic argument list. Note that this is not the o32 layout - psp-gcc
 // builds for the MIPS EABI, where the first eight arguments go in a0-a3 and t0-t3, and the rest
 // on the stack starting at sp+0 (o32 would pass four in registers and start the stack at sp+16).
-static bool ReadVarArgWord(int index, u32 *value) {
+static bool ReadVarArgWord(const MIPSState *mips, int index, u32 *value) {
 	if (index < 4) {
-		*value = currentMIPS->r[MIPS_REG_A0 + index];
+		*value = mips->r[MIPS_REG_A0 + index];
 		return true;
 	}
 	if (index < 8) {
-		*value = currentMIPS->r[MIPS_REG_T0 + index - 4];
+		*value = mips->r[MIPS_REG_T0 + index - 4];
 		return true;
 	}
-	const u32 addr = currentMIPS->r[MIPS_REG_SP] + (index - 8) * 4;
+	const u32 addr = mips->r[MIPS_REG_SP] + (index - 8) * 4;
 	if (!Memory::IsValid4AlignedAddress(addr)) {
 		ERROR_LOG(Log::HLE, "printf: bad stack pointer %08x", addr);
 		return false;
@@ -1243,7 +1299,7 @@ static bool ReadVarArgWord(int index, u32 *value) {
 	return true;
 }
 
-bool HLEFormatPrintf(u32 fmtAddr, int firstVarArg, std::string *result) {
+bool HLEFormatPrintf(const MIPSState *mips, u32 fmtAddr, int firstVarArg, std::string *result) {
 	if (!Memory::IsValidNullTerminatedString(fmtAddr)) {
 		ERROR_LOG(Log::HLE, "printf: bad format string at %08x", fmtAddr);
 		return false;
@@ -1251,10 +1307,10 @@ bool HLEFormatPrintf(u32 fmtAddr, int firstVarArg, std::string *result) {
 
 	VERBOSE_LOG(Log::HLE, "printf fmt: %s", Memory::GetCharPointerUnchecked(fmtAddr));
 	VERBOSE_LOG(Log::HLE, "printf a0-a3, t0-t3: %08x %08x %08x %08x %08x %08x %08x %08x",
-		currentMIPS->r[MIPS_REG_A0], currentMIPS->r[MIPS_REG_A1],
-		currentMIPS->r[MIPS_REG_A2], currentMIPS->r[MIPS_REG_A3],
-		currentMIPS->r[MIPS_REG_T0], currentMIPS->r[MIPS_REG_T1],
-		currentMIPS->r[MIPS_REG_T2], currentMIPS->r[MIPS_REG_T3]);
+		mips->r[MIPS_REG_A0], mips->r[MIPS_REG_A1],
+		mips->r[MIPS_REG_A2], mips->r[MIPS_REG_A3],
+		mips->r[MIPS_REG_T0], mips->r[MIPS_REG_T1],
+		mips->r[MIPS_REG_T2], mips->r[MIPS_REG_T3]);
 
 	bool processingSpecifier = false;
 	std::string specifier;
@@ -1286,7 +1342,7 @@ bool HLEFormatPrintf(u32 fmtAddr, int firstVarArg, std::string *result) {
 		case 's':
 		{
 			u32 val = 0;
-			if (!ReadVarArgWord(argIndex++, &val)) {
+			if (!ReadVarArgWord(mips, argIndex++, &val)) {
 				return false;
 			}
 			if (!Memory::IsValidNullTerminatedString(val)) {
@@ -1320,7 +1376,7 @@ bool HLEFormatPrintf(u32 fmtAddr, int firstVarArg, std::string *result) {
 			int readCount = 0;
 			while (bytesToRead != 0) {
 				u32 word = 0;
-				if (!ReadVarArgWord(argIndex++, &word)) {
+				if (!ReadVarArgWord(mips, argIndex++, &word)) {
 					return false;
 				}
 				val = val | ((u64)word << (readCount * 32));
@@ -1367,7 +1423,7 @@ size_t HLEFormatLogArgs(const MIPSState *mips, char *message, size_t sz, const c
 	for (size_t i = 0, n = strlen(argmask); i < n; ++i, ++reg) {
 		u32 regval;
 		if (reg < 8) {
-			regval = PARAM_MIPS(mips, reg);
+			regval = PARAM(reg);
 		} else {
 			u32 sp = mips->r[MIPS_REG_SP];
 			// Goes upward on stack.

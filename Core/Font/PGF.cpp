@@ -136,6 +136,11 @@ void PGF::DoState(PointerWrap &p) {
 	fontDataSize = (size_t)fontDataSizeTemp;
 	if (p.mode == p.MODE_READ) {
 		delete [] fontData;
+		fontData = nullptr;
+		if (!p.CheckRead(fontDataSize)) {
+			fontDataSize = 0;
+			return;
+		}
 		if (fontDataSize) {
 			fontData = new u8[fontDataSize];
 			DoArray(p, fontData, (int)fontDataSize);
@@ -634,7 +639,7 @@ void PGF::DrawCharacter(const GlyphImage *image, int clipX, int clipY, int clipW
 
 	if (((glyph.flags & FONT_PGF_BMP_OVERLAY) != FONT_PGF_BMP_H_ROWS) &&
 		((glyph.flags & FONT_PGF_BMP_OVERLAY) != FONT_PGF_BMP_V_ROWS)) {
-		ERROR_LOG_REPORT(Log::sceFont, "Nonsense glyph bitmap direction flag");
+		ERROR_LOG(Log::sceFont, "Nonsense glyph bitmap direction flag");
 		return;
 	}
 
@@ -645,7 +650,7 @@ void PGF::DrawCharacter(const GlyphImage *image, int clipX, int clipY, int clipW
 	//
 	// This was measured on a PSP-1000: 32 cases per format, every pixel left at its pre-fill value.
 	if (pixelFormat != PSP_FONT_PIXELFORMAT_4 && pixelFormat != PSP_FONT_PIXELFORMAT_8) {
-		WARN_LOG_REPORT_ONCE(pgfunsupportedfmt, Log::sceFont, "Font pixel format %d draws nothing on hardware", (int)pixelFormat);
+		WARN_LOG_ONCE(pgfunsupportedfmt, Log::sceFont, "Font pixel format %d draws nothing on hardware", (int)pixelFormat);
 		return;
 	}
 
@@ -774,7 +779,7 @@ void PGF::SetFontPixel(u32 base, int bpl, int bufWidth, int bufHeight, int x, in
 	// glyph smears across them - see the "Linesize = 1" case in pspautotests font/charglyphimage.
 	// The bufWidth/bufHeight rectangle above and the address check below are what keep this sane.
 	int framebufferAddr = base + (y * bpl) + (pixelBytes == 0 ? x / 2 : x * pixelBytes);
-	if (!Memory::IsValidAddress(framebufferAddr)) {
+	if (!Memory::IsValidRange(framebufferAddr, pixelBytes == 0 ? 1 : pixelBytes)) {
 		return;
 	}
 

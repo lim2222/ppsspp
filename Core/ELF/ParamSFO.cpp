@@ -26,6 +26,7 @@
 #include "Common/File/Path.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/System.h"
+#include "Core/Util/PathUtil.h"
 
 struct Header
 {
@@ -145,7 +146,7 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 
 	// The index table itself must fit entirely within the buffer before we
 	// can dereference entries; otherwise indexTables[i] reads out of bounds.
-	if (sizeof(Header) + (size_t)header->index_table_entries * sizeof(IndexTable) > size) {
+	if (sizeof(Header) + (u64)header->index_table_entries * sizeof(IndexTable) > size) {
 		return false;
 	}
 
@@ -171,15 +172,17 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 
 	for (u32 i = 0; i < header->index_table_entries; i++)
 	{
-		size_t key_offset = header->key_table_start + indexTables[i].key_table_offset;
-		if (key_offset >= size) {
+		const u64 key_offset64 = (u64)header->key_table_start + indexTables[i].key_table_offset;
+		if (key_offset64 >= size) {
 			return false;
 		}
+		const size_t key_offset = (size_t)key_offset64;
 
-		size_t data_offset = header->data_table_start + indexTables[i].data_table_offset;
-		if (data_offset >= size) {
+		const u64 data_offset64 = (u64)header->data_table_start + indexTables[i].data_table_offset;
+		if (data_offset64 >= size) {
 			return false;
 		}
+		const size_t data_offset = (size_t)data_offset64;
 
 		std::string key = readStringCapped(key_offset, 0);
 		if (key.empty())
@@ -199,7 +202,7 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 		case 0x0004:
 			// Special format UTF-8
 			{
-				if (data_offset + indexTables[i].param_len > size)
+				if ((u64)data_offset + indexTables[i].param_len > size)
 					continue;
 				const u8 *utfdata = (const u8 *)(paramsfo + data_offset);
 				VERBOSE_LOG(Log::Loader, "%s %s", key.c_str(), utfdata);
@@ -220,6 +223,14 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 		}
 	}
 
+	// The disc ID names host files and directories (configs, cheats, textures, savestates, updates),
+	// so one that could escape them is treated as missing.
+	const std::string discID(StripSpaces(GetValueString("DISC_ID")));
+	if (!discID.empty() && !IsSafePathComponent(discID)) {
+		WARN_LOG(Log::Loader, "Ignoring unsafe DISC_ID in PARAM.SFO: '%s'", discID.c_str());
+		values.erase("DISC_ID");
+	}
+
 	return true;
 }
 
@@ -233,7 +244,7 @@ int ParamSFOData::GetDataOffset(const u8 *paramsfo, size_t size, const char *dat
 		WARN_LOG(Log::Loader, "Unexpected SFO header version: %08x", header->version);
 
 	// Both the index table and the key/data tables must fit in the buffer.
-	if (sizeof(Header) + (size_t)header->index_table_entries * sizeof(IndexTable) > size)
+	if (sizeof(Header) + (u64)header->index_table_entries * sizeof(IndexTable) > size)
 		return -1;
 	if (header->key_table_start > size || header->data_table_start > size)
 		return -1;
@@ -245,19 +256,18 @@ int ParamSFOData::GetDataOffset(const u8 *paramsfo, size_t size, const char *dat
 
 	for (u32 i = 0; i < header->index_table_entries; i++)
 	{
-		// In size_t throughout - these are u32s from the file, and mixing them with int meant the
-		// bounds check below was done in whatever type the promotion landed on. ReadSFO does the
-		// same arithmetic this way.
-		size_t key_offset = header->key_table_start + indexTables[i].key_table_offset;
+		// In u64 - these are u32s from the file, and the sums can wrap a 32-bit size_t.
+		// ReadSFO does the same arithmetic this way.
+		const u64 key_offset = (u64)header->key_table_start + indexTables[i].key_table_offset;
 		if (key_offset >= size)
 			continue;
-		size_t data_offset = data_start + indexTables[i].data_table_offset;
+		const u64 data_offset = (u64)data_start + indexTables[i].data_table_offset;
 		if (data_offset >= size)
 			continue;
 
 		const char *key = (const char *)(key_start + indexTables[i].key_table_offset);
 		// Ensure the key string is NUL-terminated within the buffer before strcmp.
-		if (strnlen(key, size - key_offset) == size - key_offset)
+		if (strnlen(key, (size_t)(size - key_offset)) == size - key_offset)
 			continue;
 		if (!strcmp(key, dataName))
 		{
@@ -464,6 +474,16 @@ GameRegion DetectGameRegionFromID(std::string_view id_full) {
 			 *   'X' -> first-party Minis
 			 *   'Z' -> third-party Minis
 			 */
+		} else if (id_letters[0] == 'S' && (id_letters[1] == 'L' || id_letters[1] == 'C' || id_letters[1] == 'I')) {
+			// PS1 discs: (S)ony, then (L)icensed, (C)opyrighted or (I)nternational, then the region.
+			switch (id_letters[2]) {
+			case 'U': return GameRegion::USA;
+			case 'E': return GameRegion::EUROPE;
+			case 'P': return GameRegion::JAPAN;
+			case 'K': return GameRegion::KOREA;
+			case 'A': return GameRegion::ASIA;
+			default: break;
+			}
 		// Misc patterns
 		} else if (id_letters == "UTST") {
 			return GameRegion::TEST;

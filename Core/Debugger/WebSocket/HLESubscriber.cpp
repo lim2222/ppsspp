@@ -48,6 +48,7 @@ DebuggerSubscriber *WebSocketHLEInit(DebuggerEventHandlerMap &map) {
 	map["hle.func.removeRange"] = &WebSocketHLEFuncRemoveRange;
 	map["hle.func.rename"] = &WebSocketHLEFuncRename;
 	map["hle.func.scan"] = &WebSocketHLEFuncScan;
+	map["hle.func.hash"] = &WebSocketHLEFuncHash;
 	map["hle.module.list"] = &WebSocketHLEModuleList;
 	map["hle.module.saveSymbols"] = &WebSocketHLEModuleSaveSymbols;
 	map["hle.module.loadSymbols"] = &WebSocketHLEModuleLoadSymbols;
@@ -288,6 +289,53 @@ void WebSocketHLEFuncList(DebuggerRequest &req) {
 	});
 }
 
+// Get the code hash of the analyzed function at an address (hle.func.hash)
+//
+// This is the hash the hardcodedHashes table in MIPSAnalyst.cpp matches against to replace a game's
+// own memcpy and the like (see ReplaceTables.cpp). It's taken when the code is scanned at load, with
+// immediates masked out, so it doesn't depend on where the function was loaded.
+//
+// Parameters:
+//  - address: unsigned integer address anywhere inside the function.
+//
+// Response (same event name):
+//  - address: unsigned integer start address of the function, as the analyzer found it.
+//  - size: unsigned integer size in bytes, as the hash table entry needs it.
+//  - hash: 16 hex digits (a string, since a JSON number can't hold 64 bits).
+//  - known: name of the hash table entry with this hash and size, or null if there is none.
+void WebSocketHLEFuncHash(DebuggerRequest &req) {
+	if (!g_symbolMap)
+		return req.Fail("CPU not active");
+
+	u32 addr;
+	if (!req.ParamU32("address", &addr))
+		return;
+
+	// The analyzer's function list and hash map change on the CPU thread as modules load.
+	Core_RunOnCPUThread([&] {
+		MIPSAnalyst::AnalyzedFunction func;
+		if (!MIPSAnalyst::GetAnalyzedFunctionAt(addr, &func)) {
+			req.Fail(StringFromFormat("No analyzed function at %08x", addr));
+			return;
+		}
+		if (!func.hasHash) {
+			req.Fail(StringFromFormat("Function at %08x has no hash", func.start));
+			return;
+		}
+
+		JsonWriter &json = req.Respond();
+		json.writeUint("address", func.start);
+		json.writeUint("size", func.size);
+		json.writeString("hash", StringFromFormat("%016llx", (unsigned long long)func.hash));
+		const char *known = MIPSAnalyst::LookupHash(func.hash, func.size);
+		if (known) {
+			json.writeString("known", known);
+		} else {
+			json.writeNull("known");
+		}
+	});
+}
+
 // Add a new function symbols (hle.func.add)
 //
 // Parameters:
@@ -448,31 +496,8 @@ void WebSocketHLEFuncRemove(DebuggerRequest &req) {
 // (Note: this makes no checks whether the range is valid)
 // Returns the number of removed functions
 static u32 RemoveFuncSymbolsInRange(u32 addr, u32 size) {
-	u32 func_address = g_symbolMap->GetFunctionStart(addr);
-	if (func_address == SymbolMap::INVALID_ADDRESS) {
-		func_address = g_symbolMap->GetNextSymbolAddress(addr, SymbolType::ST_FUNCTION);
-	}
-
-	u32 counter = 0;
-	while (func_address < addr + size && func_address != SymbolMap::INVALID_ADDRESS) {
-		g_symbolMap->RemoveFunction(func_address, true);
-		++counter;
-		func_address = g_symbolMap->GetNextSymbolAddress(addr, SymbolType::ST_FUNCTION);
-	}
-
+	u32 counter = MIPSAnalyst::RemoveFunctionsInRange(addr, size);
 	if (counter) {
-		MIPSAnalyst::ForgetFunctions(addr, addr + size);
-
-		// The following was copied from hle.func.remove:
-		g_symbolMap->SortSymbols();
-
-		MIPSAnalyst::UpdateHashMap();
-		MIPSAnalyst::ApplyHashMap();
-
-		if (g_Config.bFuncReplacements) {
-			MIPSAnalyst::ReplaceFunctions();
-		}
-
 		// Clear cache for branch lines and such.
 		g_disassemblyManager.clear();
 	}
@@ -616,8 +641,8 @@ void WebSocketHLEFuncScan(DebuggerRequest &req) {
 			RemoveFuncSymbolsInRange(addr, size);
 		}
 
-		bool insertSymbols = MIPSAnalyst::ScanForFunctions(addr, addr + size, true);
-		MIPSAnalyst::FinalizeScan(insertSymbols);
+		MIPSAnalyst::ScanFunctionsInRange(addr, size);
+		g_disassemblyManager.clear();
 
 		req.Respond();
 	});

@@ -123,6 +123,8 @@ enum : uint64_t {
 
 class ShaderManagerCommon {
 public:
+	ShaderManagerCommon(const ShaderManagerCommon &) = delete;
+	ShaderManagerCommon &operator=(const ShaderManagerCommon &) = delete;
 	ShaderManagerCommon(Draw::DrawContext *draw) : draw_(draw) {}
 	virtual ~ShaderManagerCommon() {}
 
@@ -149,8 +151,9 @@ enum class PspAttributeLocation {
 	POSITION = 0,
 	TEXCOORD = 1,
 	NORMAL = 2,
-	W1 = 3,
-	W2 = 4,
+	// Colors lit on the CPU (DecVtxFormat::cpuLit). Skinning weights are never vertex attributes.
+	CPU_LIT0 = 3,
+	CPU_LIT1 = 4,
 	COLOR0 = 5,
 	COLOR1 = 6,
 
@@ -162,10 +165,18 @@ enum {
 	ATTR_POSITION = 0,
 	ATTR_TEXCOORD = 1,
 	ATTR_NORMAL = 2,
-	ATTR_W1 = 3,
-	ATTR_W2 = 4,
+	ATTR_CPU_LIT0 = 3,
+	ATTR_CPU_LIT1 = 4,
 	ATTR_COLOR0 = 5,
 	ATTR_COLOR1 = 6,
 
 	ATTR_COUNT,
 };
+
+class Path;
+
+// The shader caches end in a checksum of everything before it, so a damaged file gets rebuilt instead of loaded.
+// Appends it to a cache that has just been written and closed.
+bool AppendShaderCacheChecksum(const Path &filename);
+// False if the file or its checksum is missing, or the checksum doesn't match.
+bool VerifyShaderCacheChecksum(const Path &filename);

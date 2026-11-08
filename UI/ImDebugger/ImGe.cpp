@@ -96,9 +96,14 @@ void DrawFramebuffersWindow(ImConfig &cfg, FramebufferManagerCommon *framebuffer
 		ImGui::SliderFloat("Scale", &cfg.fbViewerZoom, 0.5f, 16.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
 
 		// Now, draw the image of the selected framebuffer.
+		// Null without buffered rendering, or if creating it failed.
 		Draw::Framebuffer *fb = vfbs[cfg.selectedFramebuffer]->fbo;
-		ImTextureID texId = ImGui_ImplThin3d_AddFBAsTextureTemp(fb, Draw::Aspect::COLOR_BIT, ImGuiPipeline::TexturedOpaque);
-		ImGui::Image(texId, ImVec2(fb->Width() * cfg.fbViewerZoom, fb->Height() * cfg.fbViewerZoom));
+		if (fb) {
+			ImTextureID texId = ImGui_ImplThin3d_AddFBAsTextureTemp(fb, Draw::Aspect::COLOR_BIT, ImGuiPipeline::TexturedOpaque);
+			ImGui::Image(texId, ImVec2(fb->Width() * cfg.fbViewerZoom, fb->Height() * cfg.fbViewerZoom));
+		} else {
+			ImGui::TextUnformatted("(no framebuffer object)");
+		}
 	}
 
 	ImGui::End();
@@ -243,9 +248,9 @@ void DrawTexturesWindow(ImConfig &cfg, TextureCacheCommon *textureCache) {
 				replacementStateCounts[(int)ReplacementState::ACTIVE],
 				replacementStateCounts[(int)ReplacementState::CANCEL_INIT]);
 		}
-		if (textureCache->Videos().size()) {
+		if (gpu->Videos().size()) {
 			if (ImGui::CollapsingHeader("Tracked video playback memory")) {
-				for (auto &video : textureCache->Videos()) {
+				for (auto &video : gpu->Videos()) {
 					ImGui::Text("%08x: %d flips, size = %d", video.addr, video.flips, video.size);
 				}
 			}
@@ -602,7 +607,8 @@ ImGeReadbackViewer::~ImGeReadbackViewer() {
 }
 
 VirtualFramebuffer *ImGeReadbackViewer::GetVFB(FramebufferManagerCommon *fbMan) const {
-	return fbMan->GetExactVFB(gstate.getFrameBufAddress(), gstate.FrameBufStride(), gstate.FrameBufFormat());
+	// fbMan is null with the software renderer.
+	return fbMan ? fbMan->GetExactVFB(gstate.getFrameBufAddress(), gstate.FrameBufStride(), gstate.FrameBufFormat()) : nullptr;
 }
 
 void ImGeReadbackViewer::DeviceLost() {
@@ -1428,7 +1434,7 @@ void ImGeDebuggerWindow::Draw(ImConfig &cfg, ImControl &control, GPUCommon *gpuD
 			if (gstate.isModeClear()) {
 				ImGui::Text("(clear mode - texturing not used)");
 			} else if (!gstate.isTextureMapEnabled()) {
-				ImGui::Text("(texturing not enabled");
+				ImGui::Text("(texturing not enabled)");
 			} else if (TextureCacheCommon *texcache = gpuDebug->GetTextureCacheCommon()) {  // We don't bother with the texture if previewCmd is BOUNDING_BOX - no texturing happens there.
 				TextureApplyResult result = texcache->ApplyTexture(false);
 				if (TexCacheEntry *tex = result.texCacheEntry) {

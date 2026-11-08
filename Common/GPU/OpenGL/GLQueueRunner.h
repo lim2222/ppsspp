@@ -109,8 +109,11 @@ struct GLRRenderData {
 			GLRInputLayout *inputLayout;
 			GLRBuffer *vertexBuffer;
 			GLRBuffer *indexBuffer;
+			// For the input layout's stream 1.
+			GLRBuffer *vertexBuffer1;
 			uint32_t vertexOffset;
 			uint32_t indexOffset;
+			uint32_t vertexOffset1;
 			GLenum mode;  // primitive
 			GLint first;
 			GLint count;
@@ -373,11 +376,18 @@ public:
 	void CreateDeviceObjects();
 	void DestroyDeviceObjects();
 
-	void CopyFromReadbackBuffer(GLRFramebuffer *framebuffer, int width, int height, Draw::DataFormat srcFormat, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels);
+	// Converts the last readback to destFormat. Returns false if that read failed or can't be converted.
+	bool CopyFromReadbackBuffer(GLRFramebuffer *framebuffer, int width, int height, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels);
 
 	void Resize(int width, int height) {
 		targetWidth_ = width;
 		targetHeight_ = height;
+	}
+
+	// Deleting a framebuffer leaves the default one bound, behind fbo_bind_fb_target's cache.
+	void ForgetBoundFramebuffers() {
+		currentDrawHandle_ = 0;
+		currentReadHandle_ = 0;
 	}
 
 	std::string GetGLString(int name) const;
@@ -414,7 +424,9 @@ private:
 	// We size it generously.
 	uint8_t *readbackBuffer_ = nullptr;
 	int readbackBufferSize_ = 0;
-	uint32_t readbackAspectMask_ = 0;
+	// What the last readback actually read, and whether it succeeded.
+	Draw::DataFormat readbackFormat_ = Draw::DataFormat::UNDEFINED;
+	bool readbackOk_ = false;
 
 	float maxAnisotropyLevel_ = 0.0f;
 
@@ -425,6 +437,8 @@ private:
 	std::unordered_map<int, std::string> glStrings_;
 
 	bool sawOutOfMemory_ = false;
+	// On from the first render pass of a frame to the last (a clear turns it off and on again within a pass).
+	bool scissorTestOn_ = false;
 	bool useDebugGroups_ = false;
 
 	GLProfiler profiler_;

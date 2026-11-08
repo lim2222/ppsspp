@@ -99,7 +99,7 @@ static bool ParseUDFFileEntryExtent(FileLoader *fileLoader, u32 sector, UDFShort
 
 	u32 extAttrLen = ReadLE32(block.data() + 0xA8);
 	u32 allocDescLen = ReadLE32(block.data() + 0xAC);
-	u32 allocDescOffset = 0xB0 + extAttrLen;
+	const u64 allocDescOffset = 0xB0 + (u64)extAttrLen;
 	if (allocDescLen < 8 || allocDescOffset + 8 > block.size())
 		return false;
 
@@ -110,11 +110,14 @@ static bool ParseUDFRootDirectory(FileLoader *fileLoader, u32 sector, u32 partit
 	UDFShortAd extent{};
 	if (!ParseUDFFileEntryExtent(fileLoader, sector, &extent))
 		return false;
-	if (extent.length == 0)
+	// A root directory is a few KB, so this cap is very generous.
+	if (extent.length == 0 || extent.length > 1024 * 1024)
 		return false;
 
+	const u64 offset = ((u64)partitionStart + extent.position) * 2048;
+	if (offset + extent.length > fileLoader->FileSize())
+		return false;
 	dirData->resize(extent.length);
-	const u64 offset = (u64)(partitionStart + extent.position) * 2048;
 	return fileLoader->ReadAt(offset, 1, dirData->size(), dirData->data()) == dirData->size();
 }
 
@@ -191,7 +194,8 @@ static bool FindUDFLayerFileEntrySectors(FileLoader *fileLoader, u32 rootSector,
 		if (entryLen == 0 || offset + entryLen > dirData.size())
 			break;
 
-		if (tag == 0x0101 && crcLen >= 20) {
+		// The fixed part of a File Identifier Descriptor is 38 bytes.
+		if (tag == 0x0101 && crcLen >= 22) {
 			u8 fileIdLen = dirData[offset + 19];
 			u16 implUseLen = ReadLE16(&dirData[offset + 36]);
 			size_t nameOffset = offset + 38 + implUseLen;
@@ -567,6 +571,10 @@ CISOFileBlockDevice::CISOFileBlockDevice(FileLoader *fileLoader)
 		return;
 	}
 	const u64 totalSize = hdr.total_bytes;
+	if (totalSize > MAX_CSO_IMAGE_SIZE) {
+		errorString_ = "Invalid CSO header (image is too large)";
+		return;
+	}
 	// Compute the counts without overflowing the 64-bit total size, then
 	// validate them before truncating to the 32-bit fields used by the CSO
 	// block reader. In particular, numFrames + 1 must remain representable.
@@ -739,6 +747,9 @@ bool CISOFileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 }
 
 bool CISOFileBlockDevice::ReadBlocks(u32 minBlock, int count, u8 *outPtr) {
+	if (count <= 0) {
+		return true;
+	}
 	if (count == 1) {
 		return ReadBlock(minBlock, outPtr);
 	}
@@ -801,7 +812,18 @@ bool CISOFileBlockDevice::ReadBlocks(u32 minBlock, int count, u8 *outPtr) {
 		}
 
 		if (plain) {
-			memcpy(outPtr, rawBuffer + frameBlockOffset * GetBlockSize(), frameBlocks * GetBlockSize());
+			// The frame's data may be shorter than a full frame (or the read came up short),
+			// so only copy what's actually in the buffer.
+			const u64 available = std::min(frameReadEnd, readBufferEnd) - frameReadPos;
+			const u64 copyStart = (u64)frameBlockOffset * GetBlockSize();
+			const u64 copyBytes = (u64)frameBlocks * GetBlockSize();
+			const u64 copied = available > copyStart ? std::min(available - copyStart, copyBytes) : 0;
+			if (copied) {
+				memcpy(outPtr, rawBuffer + copyStart, (size_t)copied);
+			}
+			if (copied < copyBytes) {
+				memset(outPtr + copied, 0, (size_t)(copyBytes - copied));
+			}
 		} else {
 			z.avail_in = frameReadSize;
 			z.next_out = frameBlocks == blocksPerFrame ? outPtr : zlibBuffer;
@@ -980,14 +1002,15 @@ bool NPDRMDemoBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 	}
 
 	int lba = blockNumber - currentBlock_;
-	if (lba >= 0 && lba < blockLBAs_){
+	if (currentBlock_ >= 0 && lba >= 0 && lba < blockLBAs_){
 		memcpy(outPtr, blockBuf_ + lba*2048, 2048);
 		return true;
 	}
 
 	int block = blockNumber / blockLBAs_;
 	lba = blockNumber % blockLBAs_;
-	currentBlock_ = block * blockLBAs_;
+	// Only marked valid once blockBuf_ has been filled successfully.
+	currentBlock_ = -1;
 
 	// blockNumber comes from the caller (ultimately from guest-controlled reads, e.g.
 	// via /sce_lbn.../_size... on a raw sector open) and isn't otherwise guaranteed to be
@@ -997,6 +1020,7 @@ bool NPDRMDemoBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 	}
 
 	if (table_[block].unk_1c != 0) {
+		memset(outPtr, 0, 2048);
 		if((u32)block == (numBlocks_ - 1))
 			return true; // demos make by fake_np
 		else
@@ -1019,6 +1043,7 @@ bool NPDRMDemoBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 
 	size_t readSize = fileLoader_->ReadAt(psarOffset+table_[block].offset, 1, table_[block].size, readBuf, flags);
 	if (readSize != (size_t)table_[block].size){
+		memset(outPtr, 0, 2048);
 		if((u32)block==(numBlocks_-1))
 			return true;
 		else
@@ -1047,6 +1072,7 @@ bool NPDRMDemoBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 		}
 	}
 
+	currentBlock_ = block * blockLBAs_;
 	memcpy(outPtr, blockBuf_+lba*2048, 2048);
 	return true;
 }
@@ -1061,19 +1087,14 @@ struct ExtendedCoreFile {
 	uint64_t seekPos;
 };
 
-CHDFileBlockDevice::CHDFileBlockDevice(FileLoader *fileLoader)
-	: BlockDevice(fileLoader), impl_(new CHDImpl()) {
-	Path paths[8];
-	paths[0] = fileLoader->GetPath();
-	int depth = 0;
-
-	core_file_ = new ExtendedCoreFile();
-	core_file_->core.argp = fileLoader;
-	core_file_->core.fsize = [](core_file *file) -> uint64_t {
+chd_file *OpenCHDThroughLoader(FileLoader *fileLoader, std::string *error) {
+	ExtendedCoreFile *coreFile = new ExtendedCoreFile();
+	coreFile->core.argp = fileLoader;
+	coreFile->core.fsize = [](core_file *file) -> uint64_t {
 		FileLoader *loader = (FileLoader *)file->argp;
 		return loader->FileSize();
 	};
-	core_file_->core.fseek = [](core_file *file, int64_t offset, int seekType) -> int {
+	coreFile->core.fseek = [](core_file *file, int64_t offset, int seekType) -> int {
 		ExtendedCoreFile *coreFile = (ExtendedCoreFile *)file;
 		switch (seekType) {
 		case SEEK_SET:
@@ -1093,19 +1114,34 @@ CHDFileBlockDevice::CHDFileBlockDevice(FileLoader *fileLoader)
 		}
 		return 0;
 	};
-	core_file_->core.fread = [](void *out_data, size_t size, size_t count, core_file *file) {
+	coreFile->core.fread = [](void *out_data, size_t size, size_t count, core_file *file) {
 		ExtendedCoreFile *coreFile = (ExtendedCoreFile *)file;
 		FileLoader *loader = (FileLoader *)file->argp;
+		if (size == 0) {
+			return (size_t)0;
+		}
 		uint64_t totalSize = size * count;
-		loader->ReadAt(coreFile->seekPos, totalSize, out_data);
-		coreFile->seekPos += totalSize;
-		return size * count;
+		size_t bytesRead = loader->ReadAt(coreFile->seekPos, totalSize, out_data);
+		coreFile->seekPos += bytesRead;
+		return bytesRead / size;
 	};
-	core_file_->core.fclose = [](core_file *file) {
+	coreFile->core.fclose = [](core_file *file) {
 		ExtendedCoreFile *coreFile = (ExtendedCoreFile *)file;
 		delete coreFile;
 		return 0;
 	};
+
+	chd_file *chd = nullptr;
+	chd_error err = chd_open_core_file(&coreFile->core, CHD_OPEN_READ, NULL, &chd);
+	if (err != CHDERR_NONE) {
+		*error = StringFromFormat("CHD error: %s: %s", fileLoader->GetPath().c_str(), chd_error_string(err));
+		return nullptr;
+	}
+	return chd;
+}
+
+CHDFileBlockDevice::CHDFileBlockDevice(FileLoader *fileLoader)
+	: BlockDevice(fileLoader), impl_(new CHDImpl()) {
 
 	/*
 	// TODO: Support parent/child CHD files.
@@ -1158,15 +1194,22 @@ CHDFileBlockDevice::CHDFileBlockDevice(FileLoader *fileLoader)
 	}
 	*/
 
-	chd_file *file = nullptr;
-	chd_error err = chd_open_core_file(&core_file_->core, CHD_OPEN_READ, NULL, &file);
-	if (err != CHDERR_NONE) {
-		errorString_ = StringFromFormat("CHD error: %s: %s", paths[depth].c_str(), chd_error_string(err));
+	chd_file *file = OpenCHDThroughLoader(fileLoader, &errorString_);
+	if (!file) {
 		return;
 	}
 
 	impl_->chd = file;
 	impl_->header = chd_get_header(impl_->chd);
+
+	// We copy 2048 bytes out of each unit, and need at least one unit per hunk
+	// (otherwise the block math below divides by zero or reads outside the hunk).
+	if (impl_->header->unitbytes < 2048 || impl_->header->hunkbytes < impl_->header->unitbytes) {
+		errorString_ = StringFromFormat("CHD has unsupported unit size %d (hunk size %d)", impl_->header->unitbytes, impl_->header->hunkbytes);
+		chd_close(file);
+		impl_->chd = nullptr;
+		return;
+	}
 
 	readBuffer = new u8[impl_->header->hunkbytes];
 	currentHunk = -1;
@@ -1200,6 +1243,9 @@ bool CHDFileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached) {
 		if (err != CHDERR_NONE) {
 			ERROR_LOG(Log::Loader, "CHD read failed: %d %d %s", blockNumber, hunk, chd_error_string(err));
 			NotifyReadError();
+			currentHunk = -1;
+			memset(outPtr, 0, GetBlockSize());
+			return false;
 		}
 		currentHunk = hunk;
 	}

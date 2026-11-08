@@ -1,7 +1,14 @@
+#include <atomic>
+#include <mutex>
+
 #include "Common/VR/PPSSPPVR.h"
+#ifdef __LIBRETRO__
+#include "libretro/LibretroVR.h"
+#endif
+#include "Common/GPU/Vulkan/VulkanRenderManager.h"
 
 #include "Common/VR/VRBase.h"
-#if XR_USE_GRAPHICS_API_OPENGL || XR_USE_GRAPHICS_API_OPENGL_ES
+#if XR_USE_GRAPHICS_API_OPENGL || XR_USE_GRAPHICS_API_OPENGL_ES || defined(__LIBRETRO__)
 #include "Common/GPU/OpenGL/GLRenderManager.h"
 #endif
 
@@ -20,6 +27,7 @@
 #include "Core/HLE/sceCtrl.h"
 
 #include "Core/Config.h"
+#include "Core/ControlMapper.h"
 #include "Core/KeyMap.h"
 #include "Core/System.h"
 
@@ -41,11 +49,15 @@ enum VRMirroring {
 };
 
 static VRAppMode appMode = VR_MENU_MODE;
+// Written from the input thread (and the render thread, for the VR controllers), read on the render thread.
+// Don't call the cbNative* callbacks with it held, they come back in here.
+static std::mutex vrInputMutex;
 static std::map<int, std::map<int, float> > pspAxis;
 static std::map<int, bool> pspKeys;  // key can be virtual, so not using the enum.
 
 static int vr3DGeometryCount = 0;
-static long vrCompat[VR_COMPAT_MAX];
+// Fog colour is recorded on the emulation thread and consumed during replay, on the render thread.
+static std::atomic<long> vrCompat[VR_COMPAT_MAX]{};
 static bool vrFlatForced = false;
 static bool vrFlatGame = false;
 static float vrMatrix[VR_MATRIX_COUNT][16];
@@ -127,9 +139,10 @@ VR app flow integration
 */
 
 bool IsVREnabled() {
-	// For now, let the OPENXR build flag control enablement.
-	// This will change.
-#ifdef OPENXR
+	// Standalone owns OpenXR; libretro uses frontend-supplied views.
+#ifdef __LIBRETRO__
+	return Libretro::VRActive();
+#elif defined(OPENXR)
 	return true;
 #else
 	return false;
@@ -175,13 +188,25 @@ void InitVROnAndroid(void* vm, void* activity, const char* system, int version, 
 }
 #endif
 
-void EnterVR(bool firstStart) {
-	if (firstStart) {
-		engine_t* engine = VR_GetEngine();
+void EnterVR() {
+	engine_t* engine = VR_GetEngine();
+	// The session outlives the render loop (it restarts when the surface comes back), not the native side.
+	if (engine->appState.Session == XR_NULL_HANDLE) {
 		VR_EnterVR(engine);
 		IN_VRInit(engine);
 	}
 	VR_SetConfig(VR_CONFIG_VIEWPORT_VALID, false);
+}
+
+void ShutdownVR() {
+	engine_t* engine = VR_GetEngine();
+	if (engine->appState.Instance == XR_NULL_HANDLE) {
+		return;
+	}
+	// GL's swapchains (Vulkan's go with its presentation).
+	VR_DestroyRenderer(engine);
+	VR_LeaveVR(engine);
+	VR_Destroy(engine);
 }
 
 void GetVRResolutionPerEye(int* width, int* height) {
@@ -209,8 +234,18 @@ void SetVRAppMode(VRAppMode mode) {
 }
 
 void UpdateVRInput(bool haptics, float dp_xscale, float dp_yscale) {
+	bool cameraAdjust;
+	std::map<int, std::map<int, float>> cameraAxes;
+	{
+		std::lock_guard<std::mutex> guard(vrInputMutex);
+		cameraAdjust = pspKeys[VIRTKEY_VR_CAMERA_ADJUST];
+		if (cameraAdjust) {
+			cameraAxes = pspAxis;
+		}
+	}
+
 	//axis
-	if (pspKeys[(int)VIRTKEY_VR_CAMERA_ADJUST]) {
+	if (cameraAdjust) {
 		AxisInput axis[2] = {};
 		axis[0].deviceId = DEVICE_ID_DEFAULT;
 		axis[1].deviceId = DEVICE_ID_DEFAULT;
@@ -260,8 +295,8 @@ void UpdateVRInput(bool haptics, float dp_xscale, float dp_yscale) {
 	}
 
 	// Camera adjust
-	if (pspKeys[VIRTKEY_VR_CAMERA_ADJUST]) {
-		for (auto& device : pspAxis) {
+	if (cameraAdjust) {
+		for (auto& device : cameraAxes) {
 			for (auto& axis : device.second) {
 				switch(axis.first) {
 					case JOYSTICK_AXIS_X:
@@ -372,11 +407,9 @@ void UpdateVRInput(bool haptics, float dp_xscale, float dp_yscale) {
 }
 
 bool UpdateVRAxis(const AxisInput *axes, size_t count) {
+	std::lock_guard<std::mutex> guard(vrInputMutex);
 	for (size_t i = 0; i < count; i++) {
 		const AxisInput &axis = axes[i];
-		if (pspAxis.find(axis.deviceId) == pspAxis.end()) {
-			pspAxis[axis.deviceId] = std::map<int, float>();
-		}
 		pspAxis[axis.deviceId][axis.axisId] = axis.value;
 	}
 	return !pspKeys[VIRTKEY_VR_CAMERA_ADJUST];
@@ -385,9 +418,12 @@ bool UpdateVRAxis(const AxisInput *axes, size_t count) {
 bool UpdateVRKeys(const KeyInput &key) {
 	//store key value
 	std::vector<int> nativeKeys;
+	const bool mapped = KeyMap::InputMappingToPspButton(InputMapping(key.deviceId, key.keyCode), &nativeKeys);
+
+	std::unique_lock<std::mutex> lock(vrInputMutex);
 	bool wasScreenKeyOn = pspKeys[CTRL_SCREEN];
 	bool wasCameraAdjustOn = pspKeys[VIRTKEY_VR_CAMERA_ADJUST];
-	if (KeyMap::InputMappingToPspButton(InputMapping(key.deviceId, key.keyCode), &nativeKeys)) {
+	if (mapped) {
 		for (int& nativeKey : nativeKeys) {
 			pspKeys[nativeKey] = key.flags & KeyInputFlags::DOWN;
 		}
@@ -416,32 +452,24 @@ bool UpdateVRKeys(const KeyInput &key) {
 		vrFlatForced = pspKeys[CTRL_SCREEN];
 	}
 
-	// Release keys on enabling camera adjust
-	if (!wasCameraAdjustOn && pspKeys[VIRTKEY_VR_CAMERA_ADJUST]) {
-		KeyInput keyUp;
-		keyUp.deviceId = key.deviceId;
-		keyUp.flags = KeyInputFlags::UP;
-
-		pspKeys[VIRTKEY_VR_CAMERA_ADJUST] = false;
-		for (auto& pspKey : pspKeys) {
-			if (pspKey.second) {
-				keyUp.keyCode = (InputKeyCode)pspKey.first;
-				cbNativeKey(keyUp);
-			}
-		}
-		pspKeys[VIRTKEY_VR_CAMERA_ADJUST] = true;
-	}
+	const bool cameraAdjust = pspKeys[VIRTKEY_VR_CAMERA_ADJUST];
 
 	// Reset camera adjust
-	if (pspKeys[VIRTKEY_VR_CAMERA_ADJUST] && pspKeys[VIRTKEY_VR_CAMERA_RESET]) {
+	if (cameraAdjust && pspKeys[VIRTKEY_VR_CAMERA_RESET]) {
 		g_Config.fCameraHeight = 0;
 		g_Config.fCameraSide = 0;
 		g_Config.fCameraDistance = 0;
 		g_Config.fCameraPitch = 0;
 	}
+	lock.unlock();
+
+	// Release keys on enabling camera adjust, since input is blocked until it's off again.
+	if (!wasCameraAdjustOn && cameraAdjust) {
+		g_controlMapper.ReleaseAll();
+	}
 
 	//block keys by camera adjust
-	return !pspKeys[VIRTKEY_VR_CAMERA_ADJUST];
+	return !cameraAdjust;
 }
 
 /*
@@ -452,7 +480,7 @@ bool UpdateVRKeys(const KeyInput &key) {
 ================================================================================
 */
 
-#if XR_USE_GRAPHICS_API_OPENGL || XR_USE_GRAPHICS_API_OPENGL_ES
+#if XR_USE_GRAPHICS_API_OPENGL || XR_USE_GRAPHICS_API_OPENGL_ES || defined(__LIBRETRO__)
 
 void PreprocessSkyplane(GLRStep* step) {
 
@@ -504,6 +532,45 @@ void PreprocessStepVR(void* step) {}
 
 #endif
 
+// PreprocessSkyplane on a Vulkan step. Depth test lives in the pipelines, and a framebuffer bound
+// as a texture shows up as a dependency on a framebuffer other than the target.
+static void PreprocessSkyplaneVulkan(VKRStep *step) {
+	if (step->stepType != VKRStepType::RENDER || IsFlatVRScene()) {
+		return;
+	}
+	for (size_t i = 0; i < step->dependencies.size(); i++) {
+		if (step->dependencies[i] != step->render.framebuffer) {
+			return;
+		}
+	}
+
+	// Clear sky with the fog color, unless the pass clears anyway (it would win over our clear on GL).
+	if (!vrCompat[VR_COMPAT_FBO_CLEAR]) {
+		if (step->render.colorLoad != VKRRenderPassLoadAction::CLEAR) {
+			step->render.colorLoad = VKRRenderPassLoadAction::CLEAR;
+			step->render.clearColor = (uint32_t)vrCompat[VR_COMPAT_FOG_COLOR];
+		}
+		vrCompat[VR_COMPAT_FBO_CLEAR] = true;
+	}
+
+	// Remove original sky plane.
+	bool depthEnabled = false;
+	for (VkRenderData &command : step->commands) {
+		if (command.cmd == VKRRenderCommand::BIND_GRAPHICS_PIPELINE) {
+			const VKRGraphicsPipelineDesc *desc = command.graphics_pipeline.pipeline->desc;
+			depthEnabled = desc && desc->dss.depthTestEnable;
+		} else if (command.cmd == VKRRenderCommand::DRAW_INDEXED && !depthEnabled) {
+			command.cmd = VKRRenderCommand::REMOVED;
+		}
+	}
+}
+
+void PreprocessVulkanStepVR(VKRStep *step) {
+	if (vrCompat[VR_COMPAT_SKYPLANE]) {
+		PreprocessSkyplaneVulkan(step);
+	}
+}
+
 void SetVRCompat(VRCompatFlag flag, long value) {
 	vrCompat[flag] = value;
 }
@@ -521,16 +588,28 @@ void* BindVRFramebuffer() {
 }
 
 bool StartVRRender() {
+#ifndef __LIBRETRO__
 	if (!VR_GetConfig(VR_CONFIG_VIEWPORT_VALID)) {
+		if (VR_GetPlatformFlag(VR_PLATFORM_RENDERER_VULKAN)) {
+			// The presentation creates the swapchain with the surface. There isn't one now.
+			return false;
+		}
 		VR_InitRenderer(VR_GetEngine());
 		VR_SetConfig(VR_CONFIG_VIEWPORT_VALID, true);
 	}
 
 	if (VR_InitFrame(VR_GetEngine())) {
+#else
+	if (Libretro::VRActive()) {
+#endif
 
 		// Get VR status
 		for (int eye = 0; eye < ovrMaxNumEyes; eye++) {
+#ifdef __LIBRETRO__
+			Libretro::GetVRView(eye, &vrView[eye]);
+#else
 			vrView[eye] = VR_GetView(eye);
+#endif
 		}
 		UpdateVRViewMatrices();
 
@@ -576,9 +655,17 @@ bool StartVRRender() {
 			VR_SetConfig(VR_CONFIG_MODE, VR_MODE_MONO_SCREEN);
 		}
 		vr3DGeometryCount /= 2;
+#ifdef __LIBRETRO__
+		// Use this frame's mode when preparing uniforms for the emulation thread.
+		UpdateVRViewMatrices();
+#endif
 
 		// Set compatibility
 		vrCompat[VR_COMPAT_SKYPLANE] = PSP_CoreParameter().compat.vrCompat().Skyplane;
+		if (VR_GetPlatformFlag(VR_PLATFORM_RENDERER_VULKAN)) {
+			// The last frame is done on the render thread, so its steps are too. (On OpenGL, this is per eye in PreVRFrameRender.)
+			vrCompat[VR_COMPAT_FBO_CLEAR] = false;
+		}
 
 		// Set customizations
 		VR_SetConfigFloat(VR_CONFIG_CANVAS_DISTANCE, !IsBigScreenVRMode() && (appMode == VR_GAME_MODE) ? g_Config.fCanvas3DDistance : g_Config.fCanvasDistance);
@@ -589,6 +676,10 @@ bool StartVRRender() {
 }
 
 void FinishVRRender() {
+	if (VR_GetPlatformFlag(VR_PLATFORM_RENDERER_VULKAN)) {
+		// The render thread ends the frame once it's submitted.
+		return;
+	}
 	VR_FinishFrame(VR_GetEngine());
 }
 
@@ -601,13 +692,43 @@ void PostVRFrameRender() {
 	VR_EndFrame(VR_GetEngine());
 }
 
+bool GetVRMouseCursorRect(int *x, int *y, int *w, int *h) {
+#ifdef __LIBRETRO__
+	return false;
+#else
+	if (!VR_GetPlatformFlag(VR_PLATFORM_RENDERER_VULKAN)) {
+		return false;
+	}
+	// The same rect VR_EndFrame clears on OpenGL, where y counts from the bottom.
+	const int vrMode = VR_GetConfig(VR_CONFIG_MODE);
+	const bool screenMode = (vrMode == VR_MODE_MONO_SCREEN) || (vrMode == VR_MODE_STEREO_SCREEN);
+	const int size = VR_GetConfig(VR_CONFIG_MOUSE_SIZE);
+	if (!screenMode || size <= 0) {
+		return false;
+	}
+	*w = size;
+	*h = (int)((float)size * VR_GetConfigFloat(VR_CONFIG_CANVAS_ASPECT));
+	*x = VR_GetConfig(VR_CONFIG_MOUSE_X);
+	*y = VR_GetConfig(VR_CONFIG_VIEWPORT_HEIGHT) - VR_GetConfig(VR_CONFIG_MOUSE_Y) - *h;
+	return true;
+#endif
+}
+
 int GetVRFBOIndex() {
+#ifdef __LIBRETRO__
+	return Libretro::VREye();
+#else
 	return VR_GetConfig(VR_CONFIG_CURRENT_FBO);
+#endif
 }
 
 int GetVRPassesCount() {
+#ifdef __LIBRETRO__
+	return Libretro::VRActive() ? 2 : 1;
+#else
 	bool vrStereo = !PSP_CoreParameter().compat.vrCompat().ForceMono && g_Config.bEnableStereo;
 	return vrStereo ? 2 : 1;
+#endif
 }
 
 bool IsPassthroughSupported() {

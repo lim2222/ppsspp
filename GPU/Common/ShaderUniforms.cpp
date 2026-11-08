@@ -9,9 +9,12 @@
 #include "Common/Math/CrossSIMD.h"
 #include "Common/Math/lin/vec3.h"
 #include "Common/TimeUtil.h"
+#include "Common/VR/PPSSPPVR.h"
+#include "Core/Config.h"
 #include "GPU/GPUState.h"
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/Common/GPUStateUtils.h"
+#include "GPU/Common/TransformCommon.h"
 #include "GPU/Math3D.h"
 
 using namespace Lin;
@@ -32,6 +35,45 @@ void UpdateRotation(float rotMatrix[4], bool useBufferedRendering) {
 	}
 }
 
+// The part of a video texture the frame fills: as much as was written there (see
+// TextureCacheCommon::ApplyTextureFinish), or 480x272 if that isn't known. The VSH's UMD Video
+// player converts 480 rows, and its strips wrap around a texture they fill the width of.
+int VideoFrameWidth() {
+	return gstate_c.videoColumns > 0 ? gstate_c.videoColumns : 480;
+}
+
+int VideoFrameHeight() {
+	return gstate_c.videoRows > 0 ? gstate_c.videoRows : 272;
+}
+
+bool VideoClampsS() {
+	return gstate.getTextureWidth(0) > VideoFrameWidth();
+}
+
+bool VideoClampsT() {
+	return gstate.getTextureHeight(0) > VideoFrameHeight();
+}
+
+void CalcTexClamp(float texClamp[4], float texClampOffset[2]) {
+	const float invW = 1.0f / (float)gstate_c.curTextureWidth;
+	const float invH = 1.0f / (float)gstate_c.curTextureHeight;
+	int w = gstate.getTextureWidth(0);
+	int h = gstate.getTextureHeight(0);
+	if (gstate_c.textureIsVideo) {
+		// Only the video frame itself, whatever is in memory around it may be garbage.
+		w = std::min(w, VideoFrameWidth());
+		h = std::min(h, VideoFrameHeight());
+	}
+
+	// First wrap xy, then half texel xy (for clamp.)
+	texClamp[0] = (float)w * invW;
+	texClamp[1] = (float)h * invH;
+	texClamp[2] = invW * 0.5f;
+	texClamp[3] = invH * 0.5f;
+	texClampOffset[0] = gstate_c.curTextureXOffset * invW;
+	texClampOffset[1] = gstate_c.curTextureYOffset * invH;
+}
+
 void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBufferedRendering, bool pixelMapped) {
 	if (dirtyUniforms & DIRTY_TEXENV) {
 		Uint8x3ToFloat3(ub->texEnvColor, gstate.texenvcolor);
@@ -50,25 +92,14 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 		Uint8x3ToFloat3(ub->blendFixB, gstate.getFixB());
 	}
 	if (dirtyUniforms & DIRTY_TEXCLAMP) {
-		const float invW = 1.0f / (float)gstate_c.curTextureWidth;
-		const float invH = 1.0f / (float)gstate_c.curTextureHeight;
-		const int w = gstate.getTextureWidth(0);
-		const int h = gstate.getTextureHeight(0);
-		const float widthFactor = (float)w * invW;
-		const float heightFactor = (float)h * invH;
-
-		// First wrap xy, then half texel xy (for clamp.)
-		ub->texClamp[0] = widthFactor;
-		ub->texClamp[1] = heightFactor;
-		ub->texClamp[2] = invW * 0.5f;
-		ub->texClamp[3] = invH * 0.5f;
-		ub->texClampOffset[0] = gstate_c.curTextureXOffset * invW;
-		ub->texClampOffset[1] = gstate_c.curTextureYOffset * invH;
+		CalcTexClamp(ub->texClamp, ub->texClampOffset);
 	}
 
 	if (dirtyUniforms & DIRTY_MIPBIAS) {
 		float mipBias = (float)gstate.getTexLevelOffset16() * (1.0 / 16.0f);
 		ub->mipBias = (mipBias + 0.5f) / (float)(gstate.getTextureMaxLevel() + 1);
+		// For GPU_USE_SHADER_LOD_BIAS. The sampler applies the bias only in auto mode, see GetSamplingParams.
+		ub->texLodBias = gstate.getTexLevelMode() == GE_TEXLEVEL_MODE_AUTO ? mipBias : 0.0f;
 	}
 
 	if (dirtyUniforms & DIRTY_PROJMATRIX) {
@@ -151,7 +182,105 @@ void BaseUpdateUniforms(UB_VS_FS_Base *ub, uint64_t dirtyUniforms, bool useBuffe
 	}
 }
 
+bool GuessVRDrawingHUD(bool is2D, bool flatScreen) {
+
+	bool hud = true;
+	//HUD shouldn't be modified in nonVR mode
+	if (IsBigScreenVRMode()) hud = false;
+	//HUD can be disabled in settings
+	else if (!g_Config.bRescaleHUD) hud = false;
+	//HUD cannot be rendered in flatscreen
+	else if (flatScreen) hud = false;
+	//HUD has to be 2D
+	else if (!is2D) hud = false;
+	//HUD has to be blended
+	else if (!gstate.isAlphaBlendEnabled()) hud = false;
+#ifdef __LIBRETRO__
+	// Untextured transition fades must cover the view, not be scaled with the HUD.
+	else if (!gstate.isTextureMapEnabled()) hud = false;
+#endif
+	//HUD cannot be rendered with clear color mask
+	else if (gstate.isClearModeColorMask()) hud = false;
+	//HUD cannot be rendered with depth color mask
+	else if (gstate.isClearModeDepthMask()) hud = false;
+	//HUD texture has to contain alpha channel
+	else if (!gstate.isTextureAlphaUsed()) hud = false;
+	//HUD texture cannot be in 5551 format
+	else if (gstate.getTextureFormat() == GETextureFormat::GE_TFMT_5551) hud = false;
+	//HUD texture cannot be in CLUT16 format
+	else if (gstate.getTextureFormat() == GETextureFormat::GE_TFMT_CLUT16) hud = false;
+	//HUD texture cannot be in CLUT32 format
+	else if (gstate.getTextureFormat() == GETextureFormat::GE_TFMT_CLUT32) hud = false;
+	//HUD cannot have full texture alpha
+	else if (gstate_c.textureSolidAlpha && gstate.getTextureFormat() != GETextureFormat::GE_TFMT_CLUT4) hud = false;
+	//HUD must have full vertex alpha
+	else if (!gstate_c.vertexFullAlpha && gstate.getDepthTestFunction() == GE_COMP_NEVER) hud = false;
+	//HUD cannot render FB screenshot
+	else if (gstate_c.curTextureHeight % 68 <= 1) hud = false;
+	//HUD cannot be rendered with add function
+	else if (gstate.getTextureFunction() == GETexFunc::GE_TEXFUNC_ADD) hud = false;
+	//HUD cannot be rendered with replace function
+	else if (gstate.getTextureFunction() == GETexFunc::GE_TEXFUNC_REPLACE) hud = false;
+	//HUD cannot be rendered with full clear color mask
+	else if ((gstate.getClearModeColorMask() == 0xFFFFFF) && (gstate.getColorMask() == 0xFFFFFF)) hud = false;
+
+	return hud;
+}
+
+void VRUpdateUniforms(UB_VS_FS_Base *base, UB_VS_VR *vr, uint64_t dirtyUniforms) {
+	// Also counts the 3D draws that decide whether the scene is 3D, so once per draw.
+	const bool is2D = Is2DVRObject(gstate.projMatrix, gstate.isModeThrough());
+	const bool flatScreen = IsFlatVRScene();
+
+	if (GuessVRDrawingHUD(is2D, flatScreen)) {
+		float aspect = 480.0f / 272.0f * (IsImmersiveVRMode() ? 0.5f : 1.0f);
+		vr->scaleX = g_Config.fHeadUpDisplayScale * aspect;
+		vr->scaleY = g_Config.fHeadUpDisplayScale;
+	} else {
+		vr->scaleX = 1.0f;
+		vr->scaleY = 1.0f;
+	}
+
+	if (dirtyUniforms & DIRTY_FOGCOLOR) {
+		// For the skyplane hack's clear.
+		SetVRCompat(VR_COMPAT_FOG_COLOR, gstate.fogcolor);
+	}
+
+	// Every draw, not only when the game changes the matrices: the result also depends on whether this
+	// draw is 2D and on the head pose. GL gets away with dirty flags because its uniforms are per program
+	// (2D and 3D draws rarely share one), while this buffer is shared by all draws.
+	{
+		if (flatScreen || is2D) {
+			memcpy(vr->projLens, gstate.projMatrix, sizeof(vr->projLens));
+		} else {
+			UpdateVRProjection(gstate.projMatrix, vr->projLens);
+		}
+		UpdateVRParams(gstate.projMatrix);
+	}
+
+	{
+		float leftEyeView[16];
+		float rightEyeView[16];
+		ConvertMatrix4x3To4x4Transposed(leftEyeView, gstate.viewMatrix);
+		ConvertMatrix4x3To4x4Transposed(rightEyeView, gstate.viewMatrix);
+		if (!is2D) {
+			UpdateVRView(leftEyeView, rightEyeView);
+		}
+		// The head pose is a rotation and a translation, so the last row stays 0 0 0 1 and the
+		// first three are the 3x4 the shaders take.
+		memcpy(base->view, leftEyeView, sizeof(base->view));
+		memcpy(vr->viewRight, rightEyeView, sizeof(vr->viewRight));
+	}
+}
+
+void DirtyDepalIfPixelMappedChanged(bool pixelMapped) {
+	if (gstate_c.shaderDepalMode != ShaderDepalMode::OFF && pixelMapped != gstate_c.depalPixelMapped) {
+		gstate_c.Dirty(DIRTY_DEPAL);
+	}
+}
+
 uint32_t PackDepalBits(bool pixelMapped) {
+	gstate_c.depalPixelMapped = pixelMapped;
 	const int indexMask = gstate.getClutIndexMask();
 	const int indexShift = gstate.getClutIndexShift();
 	const int indexOffset = gstate.getClutIndexStartPos() >> 4;
@@ -215,7 +344,7 @@ void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms) {
 		Uint8x3ToFloat4(ub->materialDiffuse, gstate.materialdiffuse);
 	}
 	if (dirtyUniforms & DIRTY_MATSPECULAR) {
-		Uint8x3ToFloat4_Alpha(ub->materialSpecular, gstate.materialspecular, std::max(0.0f, getFloat24(gstate.materialspecularcoef)));
+		Uint8x3ToFloat4_Alpha(ub->materialSpecular, gstate.materialspecular, std::max(0.0f, PSPLightExponent(getFloat24(gstate.materialspecularcoef))));
 	}
 	if (dirtyUniforms & DIRTY_MATEMISSIVE) {
 		// We're not touching the fourth f32 here, because we store an u32 of control bits in it.
@@ -235,7 +364,7 @@ void LightUpdateUniforms(UB_VS_Lights *ub, uint64_t dirtyUniforms) {
 			// ldir is only used for spotlights. Prenormalize it.
 			ExpandFloat24x3ToFloat4AndNormalize(ub->ldir[i], &gstate.ldir[i * 3]);
 			ExpandFloat24x3ToFloat4(ub->latt[i], &gstate.latt[i * 3]);
-			float lightAngle_spotCoef[2] = { getFloat24(gstate.lcutoff[i]), getFloat24(gstate.lconv[i]) };
+			float lightAngle_spotCoef[2] = { getFloat24(gstate.lcutoff[i]), PSPLightExponent(getFloat24(gstate.lconv[i])) };
 			CopyFloat2To4(ub->lightAngle_SpotCoef[i], lightAngle_spotCoef);
 			Uint8x3ToFloat4(ub->lightAmbient[i], gstate.lcolor[i * 3]);
 			Uint8x3ToFloat4(ub->lightDiffuse[i], gstate.lcolor[i * 3 + 1]);

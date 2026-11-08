@@ -49,6 +49,7 @@
 #include "Core/HLE/sceDisplay.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceNet.h"
+#include "Core/HLE/scePower.h"
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HW/Display.h"
@@ -93,11 +94,23 @@ static bool framebufIsLatched;
 
 static int enterVblankEvent = -1;
 static int leaveVblankEvent = -1;
+// Threads whose vblank wait is over, released a little after the vblank. They're released inside
+// the interrupt now (see hleEnterVblank), so this only fills from a state saved with some pending.
+static int vblankWakeEvent = -1;
+static std::vector<SceUID> vblankWakePending;
 static int afterFlipEvent = -1;
 static int lagSyncEvent = -1;
 
-static double lastLagSync = 0.0;
+// Lag sync keeps emulated time in step with the wall clock: lagSyncEmuBase (emulated us) was reached at
+// lagSyncRealBase, and each sync waits for the wall clock to catch up from there.
+static double lagSyncRealBase = 0.0;
+static u64 lagSyncEmuBase = 0;
+static float lagSyncScale = 1.0f;
 static bool lagSyncScheduled = false;
+static const int LAG_SYNC_INTERVAL_US = 1000;
+// Further behind than this (a pause, or loading), start over from now instead of catching up. Like the
+// frame throttle's limit, it lets the odd slow frame be made up for.
+static const double LAG_SYNC_MAX_BEHIND = 0.1;
 
 static int numSkippedFrames;
 static bool hasSetMode;
@@ -135,8 +148,9 @@ std::map<SceUID, int> vblankPausedWaits;
 
 // STATE END
 
-// The vblank period is 731.5 us (0.7315 ms)
-const double vblankMs = 0.7315;
+// The vblank ends ~818us after its interrupt, early in line 14 (pspautotests display/vblankphase;
+// display/vblanklen measures 730-740us from sceDisplayWaitVblankStart returning).
+const double vblankMs = 0.818;
 // These are guesses based on tests.
 const double vsyncStartMs = 0.5925;
 const double vsyncEndMs = 0.7265;
@@ -147,6 +161,12 @@ enum {
 	PSP_DISPLAY_SETBUF_NEXTFRAME = 1
 };
 
+// What the vblank interrupt costs the CPU: with no handler, and around the handlers when there are
+// some (pspautotests display/vblankphase).
+static const int VBLANK_NO_HANDLER_US = 66;
+static const int VBLANK_HANDLER_ENTRY_US = 29;
+static const int VBLANK_HANDLER_EXIT_US = 40;
+
 // For the "max 60 fps" setting.
 static int lastFlipsTooFrequent = 0;
 static u64 lastFlipCycles = 0;
@@ -154,6 +174,7 @@ static u64 nextFlipCycles = 0;
 
 void hleEnterVblank(u64 userdata, int cyclesLate);
 void hleLeaveVblank(u64 userdata, int cyclesLate);
+static void hleVblankWake(u64 userdata, int cyclesLate);
 void hleAfterFlip(u64 userdata, int cyclesLate);
 void hleLagSync(u64 userdata, int cyclesLate);
 
@@ -171,16 +192,18 @@ static bool UseLagSync() {
 	return g_Config.bForceLagSync && !UseAutoFrameSkip();
 }
 
-static void ScheduleLagSync(int over = 0) {
+static void ResetLagSyncBase() {
+	lagSyncRealBase = time_now_d();
+	lagSyncEmuBase = CoreTiming::GetGlobalTimeUs();
+}
+
+// Starts or stops lag sync to match the setting.
+static void ScheduleLagSync() {
+	CoreTiming::UnscheduleEvent(lagSyncEvent, 0);
 	lagSyncScheduled = UseLagSync();
 	if (lagSyncScheduled) {
-		// Reset over if it became too high, such as after pausing or initial loading.
-		// There's no real sense in it being more than 1/60th of a second.
-		if (over > 1000000 / framerate) {
-			over = 0;
-		}
-		CoreTiming::ScheduleEvent(usToCycles(1000 + over), lagSyncEvent, 0);
-		lastLagSync = time_now_d();
+		ResetLagSyncBase();
+		CoreTiming::ScheduleEvent(usToCycles(LAG_SYNC_INTERVAL_US), lagSyncEvent, 0);
 	}
 }
 
@@ -208,6 +231,8 @@ void __DisplayInit() {
 
 	enterVblankEvent = CoreTiming::RegisterEvent("EnterVBlank", &hleEnterVblank);
 	leaveVblankEvent = CoreTiming::RegisterEvent("LeaveVBlank", &hleLeaveVblank);
+	vblankWakeEvent = CoreTiming::RegisterEvent("VBlankWake", &hleVblankWake);
+	vblankWakePending.clear();
 	afterFlipEvent = CoreTiming::RegisterEvent("AfterFlip", &hleAfterFlip);
 
 	lagSyncEvent = CoreTiming::RegisterEvent("LagSync", &hleLagSync);
@@ -228,13 +253,28 @@ struct GPUStatistics_v0 {
 	int moreInts[15];
 };
 
+// A savestate's display framebuffer, straight from the file. The stride can be anything (the PSP
+// takes negative ones, and GE dump playback sets others): presenting checks that.
+static void SanitizeLoadedFramebuf(FrameBufferState &fb) {
+	const bool validAddr = fb.topaddr == 0 || Memory::IsRAMAddress(fb.topaddr) || Memory::IsVRAMAddress(fb.topaddr);
+	if (!validAddr || fb.fmt < GE_FORMAT_565 || fb.fmt > GE_FORMAT_8888) {
+		ERROR_LOG(Log::SaveState, "Savestate has an invalid display framebuffer (%08x, format %d), turning the display off", fb.topaddr, (int)fb.fmt);
+		fb.topaddr = 0;
+		fb.fmt = GE_FORMAT_8888;
+	}
+}
+
 void __DisplayDoState(PointerWrap &p) {
-	auto s = p.Section("sceDisplay", 1, 7);
+	auto s = p.Section("sceDisplay", 1, 8);
 	if (!s)
 		return;
 
 	Do(p, framebuf);
 	Do(p, latchedFramebuf);
+	if (p.mode == p.MODE_READ) {
+		SanitizeLoadedFramebuf(framebuf);
+		SanitizeLoadedFramebuf(latchedFramebuf);
+	}
 	Do(p, framebufIsLatched);
 	DisplayHWDoState(p, s <= 2);
 	Do(p, hasSetMode);
@@ -256,14 +296,25 @@ void __DisplayDoState(PointerWrap &p) {
 	CoreTiming::RestoreRegisterEvent(leaveVblankEvent, "LeaveVBlank", &hleLeaveVblank);
 	Do(p, afterFlipEvent);
 	CoreTiming::RestoreRegisterEvent(afterFlipEvent, "AfterFlip", &hleAfterFlip);
+	if (s >= 8) {
+		Do(p, vblankWakeEvent);
+		Do(p, vblankWakePending);
+	} else {
+		vblankWakeEvent = -1;
+		vblankWakePending.clear();
+	}
+	CoreTiming::RestoreRegisterEvent(vblankWakeEvent, "VBlankWake", &hleVblankWake);
 
 	if (s >= 5) {
 		Do(p, lagSyncEvent);
 		Do(p, lagSyncScheduled);
 		CoreTiming::RestoreRegisterEvent(lagSyncEvent, "LagSync", &hleLagSync);
-		lastLagSync = time_now_d();
-		if (lagSyncScheduled != UseLagSync()) {
-			ScheduleLagSync();
+		if (p.mode == p.MODE_READ) {
+			if (lagSyncScheduled != UseLagSync()) {
+				ScheduleLagSync();
+			} else {
+				ResetLagSyncBase();
+			}
 		}
 	} else {
 		lagSyncEvent = -1;
@@ -297,6 +348,10 @@ void __DisplayDoState(PointerWrap &p) {
 		Do(p, lastFlipCycles);
 		Do(p, nextFlipCycles);
 	}
+	if (p.mode == p.MODE_READ) {
+		// Not saved. Start counting again rather than carry over the session before the load.
+		lastFlipsTooFrequent = 0;
+	}
 
 	gpu->DoState(p);
 
@@ -308,13 +363,14 @@ void __DisplayDoState(PointerWrap &p) {
 
 void __DisplayShutdown() {
 	vblankWaitingThreads.clear();
+	vblankWakePending.clear();
 }
 
 void __DisplayVblankBeginCallback(SceUID threadID, SceUID prevCallbackId) {
 	SceUID pauseKey = prevCallbackId == 0 ? threadID : prevCallbackId;
 
-	// This means two callbacks in a row.  PSP crashes if the same callback waits inside itself (may need more testing.)
-	// TODO: Handle this better?
+	// Shouldn't happen: each nesting level pauses under its own key, and on hardware a callback can
+	// nest only one level (a CB wait that would go deeper never returns.)
 	if (vblankPausedWaits.find(pauseKey) != vblankPausedWaits.end()) {
 		return;
 	}
@@ -330,7 +386,7 @@ void __DisplayVblankBeginCallback(SceUID threadID, SceUID prevCallbackId) {
 	}
 
 	if (waitData.threadID != threadID) {
-		WARN_LOG_REPORT(Log::sceDisplay, "sceDisplayWaitVblankCB: could not find waiting thread info.");
+		WARN_LOG(Log::sceDisplay, "sceDisplayWaitVblankCB: could not find waiting thread info.");
 		return;
 	}
 
@@ -385,9 +441,9 @@ static int FrameTimingLimit() {
 		return 0;
 	// Can't slow down in hardcore mode.
 	if (PSP_CoreParameter().fpsLimit == FPSLimit::CUSTOM1)
-		return fixRate(g_Config.iFpsLimit1);
+		return fixRate(AltSpeedPercentToFps(g_Config.iAltSpeedPercent1));
 	if (PSP_CoreParameter().fpsLimit == FPSLimit::CUSTOM2)
-		return fixRate(g_Config.iFpsLimit2);
+		return fixRate(AltSpeedPercentToFps(g_Config.iAltSpeedPercent2));
 	if (PSP_CoreParameter().fpsLimit == FPSLimit::ANALOG)
 		return fixRate(PSP_CoreParameter().analogFpsLimit);
 	if (PSP_CoreParameter().fpsLimit == FPSLimit::DEBUGGER)
@@ -461,7 +517,9 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, 
 		}
 	}
 
-	if (curFrameTime < nextFrameTime && throttle) {
+	// Lag sync paces emulation already. A wait here too would be out of phase with it, and it would race
+	// to catch up afterwards.
+	if (curFrameTime < nextFrameTime && throttle && !lagSyncScheduled) {
 		// If time gap is huge just jump (somebody fast-forwarded)
 		if (nextFrameTime - curFrameTime > 2*scaledTimestep) {
 			nextFrameTime = curFrameTime;
@@ -484,7 +542,7 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, 
 
 static void DoFrameIdleTiming() {
 	PROFILE_THIS_SCOPE("timing");
-	if (!FrameTimingThrottled() || !g_Config.bEnableSound || wasPaused) {
+	if (!FrameTimingThrottled() || !g_Config.bEnableSound || wasPaused || lagSyncScheduled) {
 		return;
 	}
 
@@ -530,29 +588,40 @@ void hleEnterVblank(u64 userdata, int cyclesLate) {
 
 	VERBOSE_LOG(Log::sceDisplay, "Enter VBlank %i", vbCount);
 
+	__PowerCheckLockedClock();
+
 	DisplayFireVblankStart();
 
 	CoreTiming::ScheduleEvent(msToCycles(vblankMs) - cyclesLate, leaveVblankEvent, vbCount + 1);
 
-	// Trigger VBlank interrupt handlers.
-	__TriggerInterrupt(PSP_INTR_IMMEDIATE | PSP_INTR_ONLY_IF_ENABLED | PSP_INTR_ALWAYS_RESCHED, PSP_VBLANK_INTR, PSP_INTR_SUB_ALL);
-
-	// Wake up threads waiting for VBlank
-	u32 error;
-	bool wokeThreads = false;
+	// The interrupt comes as the last line ends (the counters wrap inside it) and takes ~66us of
+	// CPU, or ~78us with a handler, which runs ~29us in. It also releases the threads waiting for
+	// this vblank, after the handlers: a lone waiter gets the CPU ~81us after the interrupt, or ~91us
+	// with a handler, and each extra waiter holds the first back ~3us more (pspautotests
+	// display/vblankphase). Which vblank a wait is for is decided here, so a thread that starts
+	// waiting in between waits a whole frame.
+	int released = 0;
 	for (size_t i = 0; i < vblankWaitingThreads.size(); i++) {
 		if (--vblankWaitingThreads[i].vcountUnblock == 0) {
-			// Only wake it if it wasn't already released by someone else.
-			SceUID waitID = __KernelGetWaitID(vblankWaitingThreads[i].threadID, WAITTYPE_VBLANK, error);
-			if (waitID == 1) {
-				__KernelResumeThreadFromWait(vblankWaitingThreads[i].threadID, 0);
-				wokeThreads = true;
-			}
+			const SceUID threadID = vblankWaitingThreads[i].threadID;
 			vblankWaitingThreads.erase(vblankWaitingThreads.begin() + i--);
+			u32 error;
+			if (__KernelGetWaitID(threadID, WAITTYPE_VBLANK, error) == 1) {
+				__KernelResumeThreadFromWait(threadID, 0);
+				released++;
+			}
 		}
 	}
-	if (wokeThreads) {
-		__KernelReSchedule("entered vblank");
+	const int wakeUs = released > 0 ? 7 + 3 * (released - 1) : 0;
+	__SetIntrHandlerCosts(PSP_VBLANK_INTR, (int)usToCycles(VBLANK_HANDLER_ENTRY_US), (int)usToCycles(VBLANK_HANDLER_EXIT_US + wakeUs));
+
+	const bool taken = __InterruptsEnabled() && !__IsInInterrupt();
+	const int handlers = __TriggerInterrupt(PSP_INTR_IMMEDIATE | PSP_INTR_ONLY_IF_ENABLED | PSP_INTR_ALWAYS_RESCHED, PSP_VBLANK_INTR, PSP_INTR_SUB_ALL);
+	if (taken && handlers == 0) {
+		currentMIPS->downcount -= (int)usToCycles(VBLANK_NO_HANDLER_US + wakeUs);
+	} else if (released && !taken) {
+		// No interrupt to return from, so nothing else will hand them the CPU.
+		__KernelReSchedule("vblank waiters released");
 	}
 
 	// We use the emulation timebase here, for auto movements to be smooth as seen from the game.
@@ -748,6 +817,23 @@ void hleAfterFlip(u64 userdata, int cyclesLate) {
 	}
 }
 
+static void hleVblankWake(u64 userdata, int cyclesLate) {
+	u32 error;
+	bool wokeThreads = false;
+	for (SceUID threadID : vblankWakePending) {
+		// Only wake it if it wasn't already released by someone else.
+		SceUID waitID = __KernelGetWaitID(threadID, WAITTYPE_VBLANK, error);
+		if (waitID == 1) {
+			__KernelResumeThreadFromWait(threadID, 0);
+			wokeThreads = true;
+		}
+	}
+	vblankWakePending.clear();
+	if (wokeThreads) {
+		__KernelReSchedule("vblank waiters released");
+	}
+}
+
 void hleLeaveVblank(u64 userdata, int cyclesLate) {
 	flippedThisFrame = false;
 	VERBOSE_LOG(Log::sceDisplay,"Leave VBlank %i", (int)userdata - 1);
@@ -775,27 +861,26 @@ void hleLagSync(u64 userdata, int cyclesLate) {
 		scale = (float)framerate / fpsLimit;
 	}
 
-	const double goal = lastLagSync + (scale / 1000.0f);
-	double before = time_now_d();
-	// Don't lag too long ever, if they leave it paused.
-	double now = before;
-	while (now < goal && goal < now + 0.01) {
-		// Tight loop on win32 - intentionally, as timing is otherwise not precise enough.
-		// TODO: Use the precise waits if available
-#ifndef _WIN32
-		const double left = goal - now;
-		if (left > 0.0f && left < 1.0f) {  // Sanity check
-			usleep((long)(left * 1000000.0));
-		}
-#else
-		yield();
-#endif
-		now = time_now_d();
+	if (scale != lagSyncScale) {
+		lagSyncScale = scale;
+		ResetLagSyncBase();
 	}
 
-	const int emuOver = (int)cyclesToUs(cyclesLate);
-	const int over = (int)((now - goal) * 1000000);
-	ScheduleLagSync(over - emuOver);
+	// Measured from a fixed base rather than from the previous sync, so oversleeping doesn't add up.
+	const double emulated = (double)(CoreTiming::GetGlobalTimeUs() - lagSyncEmuBase) / 1000000.0;
+	const double goal = lagSyncRealBase + emulated * scale;
+	const double before = time_now_d();
+	if (before > goal + LAG_SYNC_MAX_BEHIND || goal > before + LAG_SYNC_MAX_BEHIND) {
+		ResetLagSyncBase();
+	} else if (before < goal) {
+		WaitUntil(before, goal, "lag-sync");
+	}
+	const double now = time_now_d();
+
+	lagSyncScheduled = UseLagSync();
+	if (lagSyncScheduled) {
+		CoreTiming::ScheduleEvent(usToCycles(LAG_SYNC_INTERVAL_US) - cyclesLate, lagSyncEvent, 0);
+	}
 
 	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
 		DisplayNotifySleep(now - before);
@@ -807,6 +892,14 @@ static u32 sceDisplayIsVblank() {
 }
 
 void __DisplayWaitForVblanks(const char *reason, int vblanks, bool callbacks) {
+	// Nothing can wait in an interrupt handler or with dispatch disabled, and sceDisplaySetMode
+	// then returns 0 without waiting (pspautotests intr/waits). Gods Eater Burst calls it from its
+	// vblank handler, and the wait went to the idle thread the handler runs on. Once both idle
+	// threads were waiting there was nothing left to schedule.
+	if (__IsInInterrupt() || !__KernelIsDispatchEnabled()) {
+		return;
+	}
+
 	const s64 ticksIntoFrame = CoreTiming::GetTicks(currentMIPS) - DisplayFrameStartTicks();
 	const s64 cyclesToNextVblank = msToCycles(frameMs) - ticksIntoFrame;
 
@@ -817,12 +910,14 @@ void __DisplayWaitForVblanks(const char *reason, int vblanks, bool callbacks) {
 	}
 
 	vblankWaitingThreads.push_back(WaitVBlankInfo(__KernelGetCurThread(), vblanks));
+	// Threads that wait again straight after a vblank take turns ~12us apart (display/vblankphase).
+	hleEatMicro(6);
 	__KernelWaitCurThread(WAITTYPE_VBLANK, 1, 0, 0, callbacks, reason);
 }
 
 static u32 sceDisplaySetMode(int displayMode, int displayWidth, int displayHeight) {
 	if (displayMode != PSP_DISPLAY_MODE_LCD || displayWidth != 480 || displayHeight != 272) {
-		WARN_LOG_REPORT(Log::sceDisplay, "Video out requested, not supported: mode=%d size=%d,%d", displayMode, displayWidth, displayHeight);
+		WARN_LOG(Log::sceDisplay, "Video out requested, not supported: mode=%d size=%d,%d", displayMode, displayWidth, displayHeight);
 	}
 	if (displayMode != PSP_DISPLAY_MODE_LCD) {
 		return hleLogWarning(Log::sceDisplay, SCE_KERNEL_ERROR_INVALID_MODE, "invalid mode");
@@ -875,7 +970,7 @@ void __DisplaySetFramebuf(u32 topaddr, int linesize, int pixelFormat, int sync) 
 }
 
 // Some games (GTA) never call this during gameplay, so bad place to put a framerate counter.
-int sceDisplaySetFramebuf(u32 topaddr, int linesize, int pixelformat, int sync) {
+int sceDisplaySetFramebuf(MIPSState *mips, u32 topaddr, int linesize, int pixelformat, int sync) {
 	if (sync != PSP_DISPLAY_SETBUF_IMMEDIATE && sync != PSP_DISPLAY_SETBUF_NEXTFRAME) {
 		return hleLogError(Log::sceDisplay, SCE_KERNEL_ERROR_INVALID_MODE, "invalid sync mode");
 	}
@@ -916,7 +1011,7 @@ int sceDisplaySetFramebuf(u32 topaddr, int linesize, int pixelformat, int sync) 
 		// Otherwise it'll always be ahead if the game messes up even once.
 		const s64 LEEWAY_CYCLES_PER_FLIP = usToCycles(10);
 
-		u64 now = CoreTiming::GetTicks(currentMIPS);
+		u64 now = CoreTiming::GetTicks(mips);
 		s64 cyclesAhead = nextFlipCycles - now;
 		if (cyclesAhead > FLIP_DELAY_CYCLES_MIN) {
 			if (lastFlipsTooFrequent >= FLIP_DELAY_MIN_FLIPS) {
@@ -1088,8 +1183,8 @@ static u32 sceDisplayGetMode(u32 modeAddr, u32 widthAddr, u32 heightAddr) {
 	return hleLogDebug(Log::sceDisplay, 0);
 }
 
-static u32 sceDisplayIsVsync() {
-	u64 now = CoreTiming::GetTicks(currentMIPS);
+static u32 sceDisplayIsVsync(MIPSState *mips) {
+	u64 now = CoreTiming::GetTicks(mips);
 	u64 start = DisplayFrameStartTicks() + msToCycles(vsyncStartMs);
 	u64 end = DisplayFrameStartTicks() + msToCycles(vsyncEndMs);
 
@@ -1133,6 +1228,13 @@ static u32 sceDisplaySetHoldMode(u32 hMode) {
 	return hleLogWarning(Log::sceDisplay, 0, "UNIMPL");
 }
 
+// 6.61's display_02g.prx returns a global its init sets from the LCD panel type in IdStorage:
+// 0x0103000B for type 1, 0x0103020F for type 2 (sceDisplay_driver_206276C2), never 0. The VSH's
+// video player polls it through vshbridge.prx, and with 0 never sets up its picture output.
+static u32 sceDisplay_driver_996881D2() {
+	return hleLogDebug(Log::sceDisplay, 0x0103000B);
+}
+
 const HLEFunction sceDisplay[] = {
 	{0X0E20F177, &WrapU_III<sceDisplaySetMode>,               "sceDisplaySetMode",                 'x', "iii" },
 	{0X289D82FE, &WrapI_UIII<sceDisplaySetFramebuf>,          "sceDisplaySetFrameBuf",             'i', "xiii"},
@@ -1157,6 +1259,7 @@ const HLEFunction sceDisplay[] = {
 	{0X9E3C6DC6, &WrapU_II<sceDisplaySetBrightness>,          "sceDisplaySetBrightness",           'x', "ii"  },
 	{0X4D4E10EC, &WrapU_V<sceDisplayIsVblank>,                "sceDisplayIsVblank",                'x', ""    },
 	{0X21038913, &WrapU_V<sceDisplayIsVsync>,                 "sceDisplayIsVsync",                 'x', ""    },
+	{0X996881D2, &WrapU_V<sceDisplay_driver_996881D2>,        "sceDisplay_driver_996881D2",        'x', ""    },
 };
 
 void Register_sceDisplay() {

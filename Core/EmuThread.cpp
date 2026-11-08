@@ -13,7 +13,10 @@
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/GraphicsContext.h"
+#include "Common/System/Display.h"
 #include "Common/Thread/ThreadUtil.h"
+#include "Common/TimeUtil.h"
+#include "Common/VR/PPSSPPVR.h"
 
 #include "Core/EmuThread.h"
 #include "Core/Core.h"
@@ -76,9 +79,10 @@ static void EmuThreadFunc(GraphicsContext *graphicsContext, Application *applica
 std::thread EmuThread_Start(GraphicsContext *graphicsContext, Application *application, std::function<bool(GraphicsContext *)> frame) {
 	INFO_LOG(Log::System, "EmuTread_Start");
 	_dbg_assert_(g_emuThreadState == EmuThreadState::STOPPED);
-	std::thread emuThread = std::thread(&EmuThreadFunc, graphicsContext, application, frame);
+	// Before the emu thread exists: ThreadStart sets up state that NativeInitGraphics reads (the GL
+	// strings for reporting), and resets the exit flags the emu thread sets.
 	graphicsContext->ThreadStart();
-	return emuThread;
+	return std::thread(&EmuThreadFunc, graphicsContext, application, frame);
 }
 
 // This is useful when the render thread is in control.
@@ -125,34 +129,82 @@ bool RunMainLoop(GraphicsContext *graphicsContext, Application *application, std
 	return true;
 }
 
+void RunGraphicsLoop(GraphicsContext *graphicsContext, Application *application, std::function<bool(GraphicsContext *)> frame, std::function<bool()> shouldExit) {
+	if (!graphicsContext->NeedsSeparateEmuThread()) {
+		// The backend spawns its own render thread, so this thread is simply where emulation runs.
+		SetCurrentThreadName("EmuThread");
+		if (!IsVREnabled()) {
+			RunMainLoop(graphicsContext, application, frame);
+			return;
+		}
+		// Vulkan VR. The frame begins here, so its view poses are there for the emulator's uniforms,
+		// and the render thread ends it once it's submitted. While the session is idle, nothing runs.
+		RunMainLoop(graphicsContext, application, [&](GraphicsContext *ctx) {
+			while (!StartVRRender()) {
+				if (shouldExit && shouldExit()) {
+					return false;
+				}
+				sleep_ms(16, "vr-session-idle");
+			}
+			const bool result = frame(ctx);
+			UpdateVRInput(g_Config.bHapticFeedback, g_display.dpi_scale_x, g_display.dpi_scale_y);
+			return result;
+		});
+		return;
+	}
+
+	// OpenGL wants its API calls on the thread its context is current on, which is this one. So
+	// this thread becomes the render thread - all it does is execute the GPU commands the emu
+	// thread queues up - and emulation moves to a thread we spawn here.
+	SetCurrentThreadName("RenderThread");
+
+	g_inLoop = true;
+
+	// EmuThread_Start calls ThreadStart() for us, and EmuThread_Join calls ThreadEnd(), so neither
+	// is called directly here.
+	std::thread emuThread = EmuThread_Start(graphicsContext, application, frame);
+
+	if (IsVREnabled()) {
+		EnterVR();
+	}
+
+	// Normally ThreadFrame() returning false is what gets us out of here - the frame callback
+	// decides emulation is done, and the emu thread's NotifyEmuThreadExit then queues the exit.
+	// That isn't enough in VR: while the session is idle we skip ThreadFrame() entirely, and going
+	// to the background is precisely when the session goes idle, so the exit would never be seen
+	// and whoever is waiting to join this thread would wait forever. Hence shouldExit.
+	while (!(shouldExit && shouldExit())) {
+		if (IsVREnabled() && !StartVRRender()) {
+			// The session isn't active, so there's no frame to render into. Nothing to do until it
+			// comes back - wait out a frame rather than spinning on it.
+			sleep_ms(16, "vr-session-idle");
+			continue;
+		}
+		if (!graphicsContext->ThreadFrame()) {
+			break;
+		}
+		if (IsVREnabled()) {
+			UpdateVRInput(g_Config.bHapticFeedback, g_display.dpi_scale_x, g_display.dpi_scale_y);
+			FinishVRRender();
+		}
+	}
+
+	// Also drains whatever the emu thread still had queued, so it can't get stuck waiting on us.
+	EmuThread_Join(graphicsContext, emuThread);
+
+	g_inLoop = false;
+
+	INFO_LOG(Log::System, "RenderThread - joined");
+}
+
 // Call InitAPI and ShutdownAPI outside this!
 bool MainThreadFunc(GraphicsContext *graphicsContext, Application *application, const WindowDesc &windowDesc, std::function<bool(GraphicsContext *)> frame, std::string *errorMessage) {
-	// This is now the render thread, and will spawn the emu thread below.
 	if (!graphicsContext->InitSurface(windowDesc.winsys, windowDesc.data1, windowDesc.data2, errorMessage)) {
 		ERROR_LOG(Log::G3D, "MainThreadFunc: InitSurface failed: %s", errorMessage->c_str());
 		delete application;
 		return false;
 	}
-	if (graphicsContext->NeedsSeparateEmuThread()) {
-		SetCurrentThreadName("RenderThread");
-
-		g_inLoop = true;
-		std::thread emuThread = EmuThread_Start(graphicsContext, application, frame);
-		graphicsContext->ThreadStart();
-		// This thread becomes the render thread. EmuThread will tell it when to quit by sending a message.
-		while (graphicsContext->ThreadFrame()) {}
-		EmuThread_Join(graphicsContext, emuThread);
-		g_inLoop = false;
-
-		graphicsContext->ThreadEnd();
-
-		INFO_LOG(Log::System, "RenderThread - joined");
-
-	} else {
-		SetCurrentThreadName("MainThread");
-
-		RunMainLoop(graphicsContext, application, frame);
-	}
+	RunGraphicsLoop(graphicsContext, application, frame);
 	graphicsContext->ShutdownSurface();
 	return true;
 }

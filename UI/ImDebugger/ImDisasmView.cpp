@@ -5,6 +5,7 @@
 #include "Common/StringUtils.h"
 #include "Common/Log.h"
 #include "Common/Math/geom2d.h"
+#include "Core/Config.h"
 #include "Core/Core.h"
 #include "Core/HLE/HLE.h"
 #include "Core/Debugger/DebugInterface.h"
@@ -778,8 +779,16 @@ void ImDisasmView::CopyInstructions(u32 startAddr, u32 endAddr, CopyInstructions
 	}
 }
 
+void ImDisasmView::RemoveFunction(u32 funcStart) {
+	g_symbolMap->RemoveFunction(funcStart, true);
+	g_symbolMap->SortSymbols();
+	g_disassemblyManager.clear();
+	mapReloaded_ = true;
+}
+
 void ImDisasmView::PopupMenu(MIPSState *mips, ImControl &control) {
 	bool renameFunctionPopup = false;
+	bool funcRangePopup = false;
 	if (ImGui::BeginPopup("context")) {
 		// The source location is the more useful heading when there is one, but keep the address:
 		// it's what you paste into a bug report or another debugger.
@@ -844,6 +853,10 @@ void ImDisasmView::PopupMenu(MIPSState *mips, ImControl &control) {
 			}
 		}
 		ImGui::Separator();
+		const u32 funcStart = g_symbolMap->GetFunctionStart(curAddress_);
+		if (ImGui::MenuItem("Select in symbol list", nullptr, false, funcStart != -1)) {
+			symbolListRequest_ = funcStart;
+		}
 		if (ImGui::MenuItem("Rename function")) {
 			funcBegin_ = g_symbolMap->GetFunctionStart(curAddress_);
 			if (funcBegin_ != -1) {
@@ -854,24 +867,14 @@ void ImDisasmView::PopupMenu(MIPSState *mips, ImControl &control) {
 				statusBarText_ = "No function here";
 			}
 		}
-		if (ImGui::MenuItem("Remove function")) {
-			u32 funcBegin = g_symbolMap->GetFunctionStart(curAddress_);
-			if (funcBegin != -1) {
-				u32 prevBegin = g_symbolMap->GetFunctionStart(funcBegin - 1);
-				if (prevBegin != -1)
-				{
-					u32 expandedSize = g_symbolMap->GetFunctionSize(prevBegin) + g_symbolMap->GetFunctionSize(funcBegin);
-					g_symbolMap->SetFunctionSize(prevBegin, expandedSize);
-				}
-
-				g_symbolMap->RemoveFunction(funcBegin, true);
-				g_symbolMap->SortSymbols();
-				g_disassemblyManager.clear();
-
-				mapReloaded_ = true;
-			} else {
-				statusBarText_ = "WARNING: unable to find function symbol here";
-			}
+		if (ImGui::MenuItem("Remove function", nullptr, false, funcStart != -1)) {
+			RemoveFunction(funcStart);
+		}
+		// For when MIPSAnalyst split a function in two.
+		const u32 prevFuncStart = funcStart != -1 ? g_symbolMap->GetFunctionStart(funcStart - 1) : (u32)-1;
+		if (ImGui::MenuItem("Merge into previous function", nullptr, false, prevFuncStart != -1)) {
+			g_symbolMap->SetFunctionSize(prevFuncStart, g_symbolMap->GetFunctionSize(prevFuncStart) + g_symbolMap->GetFunctionSize(funcStart));
+			RemoveFunction(funcStart);
 		}
 		u32 prevBegin = g_symbolMap->GetFunctionStart(curAddress_);
 		if (ImGui::MenuItem("Add function")) {
@@ -904,9 +907,76 @@ void ImDisasmView::PopupMenu(MIPSState *mips, ImControl &control) {
 				mapReloaded_ = true;
 			}
 		}
+		if (ImGui::MenuItem("Scan/remove functions in range...")) {
+			// Prefill with the selection if there is one, otherwise the function we're in.
+			if (selectRangeEnd_ - selectRangeStart_ > 4 || funcStart == -1) {
+				funcRangeAddr_ = selectRangeStart_;
+				funcRangeSize_ = selectRangeEnd_ - selectRangeStart_;
+			} else {
+				funcRangeAddr_ = funcStart;
+				funcRangeSize_ = g_symbolMap->GetFunctionSize(funcStart);
+			}
+			funcRangeError_.clear();
+			funcRangePopup = true;
+		}
+		if (ImGui::MenuItem("Reapply function replacements", nullptr, false, g_Config.bFuncReplacements)) {
+			MIPSAnalyst::ReplaceFunctions();
+		}
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+			ImGui::SetTooltip("Installs the HLE replacements (ReplaceTables) for every known function whose hash matches.");
+		}
 		if (prevBegin != -1) {
 			u32 prevSize = g_symbolMap->GetFunctionSize(prevBegin);
 			ShowInMemoryDumperMenuItem(prevBegin, prevSize, MemDumpMode::Disassembly, control);
+		}
+		ImGui::EndPopup();
+	}
+
+	if (funcRangePopup) {
+		ImGui::OpenPopup("funcRange");
+	}
+	if (ImGui::BeginPopup("funcRange")) {
+		ImGui::TextUnformatted("Scan or remove functions in range");
+		if (ImGui::IsWindowAppearing()) {
+			ImGui::SetKeyboardFocusHere();
+		}
+		ImGui::InputScalar("Address", ImGuiDataType_U32, &funcRangeAddr_, nullptr, nullptr, "%08X", ImGuiInputTextFlags_CharsHexadecimal);
+		ImGui::InputScalar("Size", ImGuiDataType_U32, &funcRangeSize_, nullptr, nullptr, "%08X", ImGuiInputTextFlags_CharsHexadecimal);
+
+		enum class RangeAction { NONE, SCAN, REMOVE, RESCAN };
+		RangeAction action = RangeAction::NONE;
+		if (ImGui::Button("Scan")) {
+			action = RangeAction::SCAN;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Remove")) {
+			action = RangeAction::REMOVE;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Remove and rescan")) {
+			action = RangeAction::RESCAN;
+		}
+		if (action != RangeAction::NONE) {
+			if (funcRangeSize_ == 0 || !Memory::IsValidRange(funcRangeAddr_, funcRangeSize_)) {
+				funcRangeError_ = "Invalid range";
+			} else {
+				u32 removed = 0;
+				if (action != RangeAction::SCAN) {
+					removed = MIPSAnalyst::RemoveFunctionsInRange(funcRangeAddr_, funcRangeSize_);
+				}
+				if (action != RangeAction::REMOVE) {
+					MIPSAnalyst::ScanFunctionsInRange(funcRangeAddr_, funcRangeSize_);
+				}
+				g_disassemblyManager.clear();
+				mapReloaded_ = true;
+				if (action == RangeAction::REMOVE) {
+					statusBarText_ = StringFromFormat("Removed %d functions", removed);
+				}
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		if (!funcRangeError_.empty()) {
+			ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", funcRangeError_.c_str());
 		}
 		ImGui::EndPopup();
 	}
@@ -1338,6 +1408,25 @@ void ImDisasmWindow::Draw(MIPSDebugInterface *mipsDebug, ImConfig &cfg, ImContro
 			}
 		}
 
+		// From "Select in symbol list" in the disassembly's context menu. Only moves the list's
+		// selection, the disassembly stays where it is.
+		u32 requestedSymbol;
+		if (disasmView_.TakeSymbolListRequest(&requestedSymbol)) {
+			for (int i = 0; i < (int)symCache_.size(); i++) {
+				if (symCache_[i].address != requestedSymbol) {
+					continue;
+				}
+				selectedSymbol_ = i;
+				truncate_cpy(selectedSymbolName_, symCache_[i].name);
+				scrollToSelectedSymbol_ = true;
+				if (symFilter_[0] != '\0' && !containsNoCase(symCache_[i].name, symFilter_)) {
+					symFilter_[0] = '\0';
+					symMatchesDirty_ = true;
+				}
+				break;
+			}
+		}
+
 		if (selectedSymbol_ >= 0 && selectedSymbol_ < (int)symCache_.size()) {
 			auto &sym = symCache_[selectedSymbol_];
 			if (ImGui::TreeNode("Edit Symbol", "Edit %s", sym.name.c_str())) {
@@ -1377,6 +1466,18 @@ void ImDisasmWindow::Draw(MIPSDebugInterface *mipsDebug, ImConfig &cfg, ImContro
 		}
 
 		if (ImGui::BeginListBox("##symbols", ImGui::GetContentRegionAvail())) {
+			if (scrollToSelectedSymbol_) {
+				scrollToSelectedSymbol_ = false;
+				auto it = std::find(symMatches_.begin(), symMatches_.end(), selectedSymbol_);
+				if (it != symMatches_.end()) {
+					// The clipper below only submits visible rows, so scroll by row height to center it.
+					const float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+					ImGui::SetScrollY((float)(it - symMatches_.begin()) * rowHeight - (ImGui::GetWindowHeight() - rowHeight) * 0.5f);
+				}
+			}
+			// The default selection color is translucent blue, which barely shows on the list box's
+			// blue background.
+			ImGui::PushStyleColor(ImGuiCol_Header, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
 			ImGuiListClipper clipper;
 			clipper.Begin((int)symMatches_.size(), -1);
 			while (clipper.Step()) {
@@ -1398,12 +1499,18 @@ void ImDisasmWindow::Draw(MIPSDebugInterface *mipsDebug, ImConfig &cfg, ImContro
 						if (ImGui::MenuItem("Copy address to clipboard")) {
 							System_CopyStringToClipboard(StringFromFormat("%08x", symCache_[i].address));
 						}
+						ImGui::Separator();
+						// The list rebuilds next frame, from the map's new version.
+						if (ImGui::MenuItem("Delete symbol")) {
+							disasmView_.RemoveFunction(symCache_[i].address);
+						}
 						ImGui::EndPopup();
 					}
 					ImGui::PopID();
 				}
 			}
 			clipper.End();
+			ImGui::PopStyleColor();
 			ImGui::EndListBox();
 		}
 	}

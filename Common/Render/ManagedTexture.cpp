@@ -54,11 +54,6 @@ private:
 	ManagedTexture::LoadState *state_;
 };
 
-TempImage::~TempImage() {
-	// Make sure you haven't forgotten to call Free.
-	_dbg_assert_(levels[0] == nullptr);
-}
-
 static Draw::DataFormat ZimToT3DFormat(int zim) {
 	switch (zim) {
 	case ZIM_RGBA8888: return Draw::DataFormat::R8G8B8A8_UNORM;
@@ -99,6 +94,18 @@ bool TempImage::LoadTextureLevelsFromFileData(const uint8_t *data, size_t size, 
 	switch (typeSuggestion) {
 	case ImageFileType::ZIM:
 		numLevels = LoadZIMPtr((const uint8_t *)data, size, width, height, &zimFlags, levels);
+		if (numLevels <= 0) {
+			numLevels = 0;
+			return false;
+		}
+		// Everything below treats the data as four bytes per pixel.
+		if ((zimFlags & ZIM_FORMAT_MASK) != ZIM_RGBA8888 || width[0] > maxWidth || height[0] > maxHeight) {
+			ERROR_LOG(Log::IO, "Unsupported ZIM: format %d, %dx%d", zimFlags & ZIM_FORMAT_MASK, width[0], height[0]);
+			free(levels[0]);
+			levels[0] = nullptr;
+			numLevels = 0;
+			return false;
+		}
 		fmt = ZimToT3DFormat(zimFlags & ZIM_FORMAT_MASK);
 		ConvertRGBA8888ToPremulAlpha((u32 *)levels[0], (const u32 *)levels[0], width[0] * height[0]);
 		break;
@@ -122,6 +129,22 @@ bool TempImage::LoadTextureLevelsFromFileData(const uint8_t *data, size_t size, 
 	case ImageFileType::JPEG:
 	{
 		int actual_components = 0;
+		if (size > INT_MAX) {
+			return false;
+		}
+		// Check the size before decoding.
+		{
+			jpgd::jpeg_decoder_mem_stream stream(data, (jpgd::uint)size);
+			jpgd::jpeg_decoder decoder(&stream);
+			if (decoder.get_error_code() != jpgd::JPGD_SUCCESS) {
+				ERROR_LOG(Log::IO, "Bad JPEG header");
+				return false;
+			}
+			if (decoder.get_width() <= 0 || decoder.get_height() <= 0 || decoder.get_width() > maxWidth || decoder.get_height() > maxHeight) {
+				ERROR_LOG(Log::IO, "JPEG too large: %dx%d (max %dx%d)", decoder.get_width(), decoder.get_height(), maxWidth, maxHeight);
+				return false;
+			}
+		}
 		unsigned char *jpegBuf = jpgd::decompress_jpeg_image_from_memory(data, (int)size, &width[0], &height[0], &actual_components, 4);
 		if (jpegBuf) {
 			numLevels = 1;

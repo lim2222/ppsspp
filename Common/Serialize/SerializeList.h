@@ -32,6 +32,15 @@ void DoList(PointerWrap &p, std::list<T> &x, T &default_val) {
 			return;
 		}
 	}
+	// See DoVector.
+	if (p.mode == PointerWrap::MODE_READ && sizeof(T) > SerializeMinElemSize<T>()) {
+		x.clear();
+		for (u32 i = 0; i < list_size && !p.Failed(); i++) {
+			x.push_back(default_val);
+			Do(p, x.back());
+		}
+		return;
+	}
 	x.resize(list_size, default_val);
 
 	for (T &elem : x)
@@ -40,6 +49,13 @@ void DoList(PointerWrap &p, std::list<T> &x, T &default_val) {
 
 template<class T>
 void Do(PointerWrap &p, std::list<T *> &x) {
+	if (p.mode == PointerWrap::MODE_READ) {
+		// The elements are owned (DoClass replaces them), and a shorter list would drop the rest.
+		for (T *elem : x) {
+			delete elem;
+		}
+		x.clear();
+	}
 	T *dv = nullptr;
 	Do(p, x, dv);
 }

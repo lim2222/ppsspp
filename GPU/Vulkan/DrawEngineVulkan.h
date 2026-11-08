@@ -33,6 +33,7 @@
 #include "Common/Data/Collections/Hashmaps.h"
 
 #include "GPU/Vulkan/VulkanUtil.h"
+#include "Common/GPU/Vulkan/VulkanMemory.h"
 
 #include "GPU/GPUState.h"
 #include "GPU/GPUCommon.h"
@@ -69,10 +70,7 @@ enum {
 	DRAW_BINDING_DYNUBO_BASE = 3,
 	DRAW_BINDING_DYNUBO_LIGHT = 4,
 	DRAW_BINDING_DYNUBO_BONE = 5,
-	DRAW_BINDING_TESS_STORAGE_BUF = 6,
-	DRAW_BINDING_TESS_STORAGE_BUF_WU = 7,
-	DRAW_BINDING_TESS_STORAGE_BUF_WV = 8,
-	DRAW_BINDING_COUNT = 9,
+	DRAW_BINDING_COUNT = 6,
 };
 
 // Handles transform, lighting and drawing.
@@ -183,6 +181,9 @@ private:
 
 	VulkanPushPool *pushVertex_ = nullptr;
 	VulkanPushPool *pushIndex_ = nullptr;
+	// All zeroes, the stream of CPU-lit colors for draws with nothing lit on the CPU. Filled on first use.
+	VulkanBuffer zeroCpuLitStream_;
+	VkBuffer ZeroCpuLitStream(VulkanRenderManager *renderManager);
 
 	// Other
 	ShaderManagerVulkan *shaderManager_ = nullptr;

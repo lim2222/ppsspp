@@ -25,9 +25,6 @@
 [submodule "zstd"]
 	path = ext/zstd
 	url = https://github.com/facebook/zstd.git
-[submodule "SDL/macOS"]
-	path = SDL/macOS
-	url = https://github.com/hrydgard/ppsspp-mac-sdl
 [submodule "ppsspp-debugger"]
 	path = assets/debugger
 	url = https://github.com/unknownbrackets/ppsspp-debugger.git
@@ -66,3 +63,6 @@
 [submodule "frametests"]
 	path = frametests
 	url = https://github.com/hrydgard/ppsspp-frametest-ci.git
+[submodule "ext/oboe"]
+	path = ext/oboe
+	url = https://github.com/google/oboe.git

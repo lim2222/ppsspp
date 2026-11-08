@@ -15,6 +15,8 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "Common/Serialize/Serializer.h"
+#include "Common/Serialize/SerializeMap.h"
 #include "Core/FileSystems/BlobFileSystem.h"
 
 BlobFileSystem::BlobFileSystem(IHandleAllocator *hAlloc, FileLoader *fileLoader, std::string alias)
@@ -27,7 +29,11 @@ BlobFileSystem::~BlobFileSystem() {
 }
 
 void BlobFileSystem::DoState(PointerWrap &p) {
-	// Not used in real emulation.
+	auto s = p.Section("BlobFileSystem", 1);
+	if (!s)
+		return;
+	// The open handles and their positions. The blob is the one booted.
+	Do(p, entries_);
 }
 
 std::vector<PSPFileInfo> BlobFileSystem::GetDirListing(std::string_view path, bool *exists) {
@@ -85,6 +91,10 @@ size_t BlobFileSystem::SeekFile(u32 handle, s32 position, FileMove type) {
 		case FILEMOVE_END:
 			entry->second = fileLoader_->FileSize() + position;
 			break;
+		}
+		// Reads take the position as a file offset.
+		if (entry->second < 0) {
+			entry->second = 0;
 		}
 		return (size_t)entry->second;
 	}

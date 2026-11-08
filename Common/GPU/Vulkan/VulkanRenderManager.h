@@ -16,7 +16,6 @@
 #include "Common/System/Display.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/GPU/Vulkan/VulkanBarrier.h"
-#include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Data/Collections/FastVec.h"
 #include "Common/Math/math_util.h"
 #include "Common/GPU/DataFormat.h"
@@ -102,7 +101,8 @@ public:
 
 	VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 	VkVertexInputAttributeDescription attrs[8]{};
-	VkVertexInputBindingDescription ibd{};
+	// The second is only used by pipelines with two vertex streams.
+	VkVertexInputBindingDescription ibd[2]{};
 	VkPipelineVertexInputStateCreateInfo vis{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
 	VkPipelineViewportStateCreateInfo views{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
 
@@ -115,6 +115,8 @@ public:
 
 // Wrapped pipeline. Does own desc!
 struct VKRGraphicsPipeline {
+	VKRGraphicsPipeline(const VKRGraphicsPipeline &) = delete;
+	VKRGraphicsPipeline &operator=(const VKRGraphicsPipeline &) = delete;
 	VKRGraphicsPipeline(PipelineFlags flags, const char *tag) : flags_(flags), tag_(tag) {}
 	~VKRGraphicsPipeline();
 
@@ -195,6 +197,9 @@ static_assert(sizeof(PackedDescriptor::buffer) == 16, "PackedDescriptor should b
 // Note that we only support a single descriptor set due to compatibility with some ancient devices.
 // We should probably eventually give that up eventually.
 struct VKRPipelineLayout {
+	VKRPipelineLayout() = default;
+	VKRPipelineLayout(const VKRPipelineLayout &) = delete;
+	VKRPipelineLayout &operator=(const VKRPipelineLayout &) = delete;
 	~VKRPipelineLayout();
 
 	enum { MAX_DESC_SET_BINDINGS = 5 };
@@ -259,13 +264,15 @@ public:
 	//
 	// It can be useful to use GetCurrentStepId() to figure out when you need to send all this state again, if you're
 	// not keeping track of your calls to this function on your own.
-	void BindFramebufferAsRenderTarget(VKRFramebuffer *fb, VKRRenderPassLoadAction color, VKRRenderPassLoadAction depth, VKRRenderPassLoadAction stencil, uint32_t clearColor, float clearDepth, uint8_t clearStencil, const char *tag);
+	// With no framebuffer, renders to swapchain, or the main one if that's null too.
+	void BindFramebufferAsRenderTarget(VKRFramebuffer *fb, VKRRenderPassLoadAction color, VKRRenderPassLoadAction depth, VKRRenderPassLoadAction stencil, uint32_t clearColor, float clearDepth, uint8_t clearStencil, const char *tag, VKRSwapchain *swapchain = nullptr);
 
 	// Returns an ImageView corresponding to a framebuffer. Is called BindFramebufferAsTexture to maintain a similar interface
 	// as the other backends, even though there's no actual binding happening here.
 	// For layer, we use the same convention as thin3d, where layer = -1 means all layers together. For texturing, that means that you
 	// get an array texture view.
-	VkImageView BindFramebufferAsTexture(VKRFramebuffer *fb, int binding, VkImageAspectFlags aspectBits, int layer);
+	// With samples, binds the multisampled color image (for texelFetch of single samples) instead of the resolved one.
+	VkImageView BindFramebufferAsTexture(VKRFramebuffer *fb, int binding, VkImageAspectFlags aspectBits, int layer, bool samples = false);
 
 	bool CopyFramebufferToMemory(VKRFramebuffer *src, VkImageAspectFlags aspectBits, int x, int y, int w, int h, Draw::DataFormat destFormat, uint8_t *pixels, int pixelStride, Draw::ReadbackMode mode, const char *tag);
 	void CopyImageToMemorySync(VkImage image, int mipLevel, int x, int y, int w, int h, Draw::DataFormat destFormat, uint8_t *pixels, int pixelStride, const char *tag);
@@ -285,7 +292,8 @@ public:
 
 	void ReportBadStateForDraw();
 
-	int WaitForPipelines();
+	// True while there are queued or compiling pipelines.
+	bool PipelinesPending();
 
 	void NudgeCompilerThread() {
 		compileQueueMutex_.lock();
@@ -391,11 +399,11 @@ public:
 		data.stencil.stencilRef = refValue;
 	}
 
-	void SetBlendFactor(uint32_t color) {
+	void SetBlendFactor(const float color[4]) {
 		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == VKRStepType::RENDER);
 		VkRenderData &data = curRenderStep_->commands.push_uninitialized();
 		data.cmd = VKRRenderCommand::BLEND;
-		data.blendColor.color = color;
+		memcpy(data.blendColor.color, color, sizeof(data.blendColor.color));
 	}
 
 	void PushConstants(VkShaderStageFlags stages, int offset, int size, void *constants) {
@@ -459,7 +467,8 @@ public:
 		return retval;
 	}
 
-	void Draw(int descSetIndex, int numUboOffsets, const uint32_t *uboOffsets, VkBuffer vbuffer, int voffset, int count, int offset = 0) {
+	// vbuffer1 is for the pipeline's second vertex stream, if it has one.
+	void Draw(int descSetIndex, int numUboOffsets, const uint32_t *uboOffsets, VkBuffer vbuffer, int voffset, int count, int offset = 0, VkBuffer vbuffer1 = VK_NULL_HANDLE, uint32_t voffset1 = 0) {
 		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == VKRStepType::RENDER && curStepHasViewport_ && curStepHasScissor_);
 		VkRenderData &data = curRenderStep_->commands.push_uninitialized();
 		data.cmd = VKRRenderCommand::DRAW;
@@ -468,6 +477,8 @@ public:
 		data.draw.descSetIndex = descSetIndex;
 		data.draw.vbuffer = vbuffer;
 		data.draw.voffset = voffset;
+		data.draw.vbuffer1 = vbuffer1;
+		data.draw.voffset1 = voffset1;
 		data.draw.numUboOffsets = numUboOffsets;
 		_dbg_assert_(numUboOffsets <= ARRAY_SIZE(data.draw.uboOffsets));
 		for (int i = 0; i < numUboOffsets; i++)
@@ -475,7 +486,7 @@ public:
 		curRenderStep_->render.numDraws++;
 	}
 
-	void DrawIndexed(int descSetIndex, int numUboOffsets, const uint32_t *uboOffsets, VkBuffer vbuffer, int voffset, VkBuffer ibuffer, int ioffset, int count, int numInstances) {
+	void DrawIndexed(int descSetIndex, int numUboOffsets, const uint32_t *uboOffsets, VkBuffer vbuffer, int voffset, VkBuffer ibuffer, int ioffset, int count, int numInstances, VkBuffer vbuffer1 = VK_NULL_HANDLE, uint32_t voffset1 = 0) {
 		_dbg_assert_(curRenderStep_ && curRenderStep_->stepType == VKRStepType::RENDER && curStepHasViewport_ && curStepHasScissor_);
 		VkRenderData &data = curRenderStep_->commands.push_uninitialized();
 		data.cmd = VKRRenderCommand::DRAW_INDEXED;
@@ -484,6 +495,8 @@ public:
 		data.drawIndexed.descSetIndex = descSetIndex;
 		data.drawIndexed.vbuffer = vbuffer;
 		data.drawIndexed.voffset = voffset;
+		data.drawIndexed.vbuffer1 = vbuffer1;
+		data.drawIndexed.voffset1 = voffset1;
 		data.drawIndexed.ibuffer = ibuffer;
 		data.drawIndexed.ioffset = ioffset;
 		data.drawIndexed.numUboOffsets = numUboOffsets;
@@ -506,6 +519,12 @@ public:
 
 	bool CreateBackbuffers();
 	void DestroyBackbuffers();
+
+	// Swapchains other than the main one, for other windows or displays. Use between frames, on the emu thread.
+	// They use the main swapchain's format, and don't pace the frame. Resizing and destroying wait for the GPU.
+	VKRSwapchain *CreateExtraSwapchain(WindowSystem winsys, void *data1, void *data2, int width, int height, std::string *error);
+	void DestroyExtraSwapchain(VKRSwapchain *swapchain);
+	void ResizeExtraSwapchain(VKRSwapchain *swapchain, int width, int height);
 
 	bool HasBackbuffers() {
 		return queueRunner_.HasBackbuffers();
@@ -563,7 +582,10 @@ private:
 	void ResetDescriptorLists(int frame);
 	void FlushDescriptors(int frame);
 
-	void SanityCheckPassesOnAdd();
+	void SanityCheckPassesOnAdd(VKRFramebuffer *fb, VKRSwapchain *swapchain);
+	bool InitExtraSwapchain(VKRSwapchain *swapchain, std::string *error);
+	void DestroyExtraSwapchainResources(VKRSwapchain *swapchain);
+	void RecreateExtraSwapchain(VKRSwapchain *swapchain);
 	bool CreateSwapchainViewsAndDepth(VkCommandBuffer cmdInit, VulkanBarrierBatch *barriers, FrameDataShared &frameDataShared);
 	bool RecreatePresentationIfNeeded();
 
@@ -600,6 +622,7 @@ private:
 	BoundingRect curRenderArea_;
 
 	std::vector<VKRStep *> steps_;
+	std::vector<VKRSwapchain *> extraSwapchains_;
 
 	// Execution time state
 	VulkanContext *vulkan_;
@@ -623,6 +646,8 @@ private:
 	std::condition_variable compileCond_;
 	std::mutex compileQueueMutex_;
 	std::vector<CompileQueueEntry> compileQueue_;
+	// Set while the compile thread turns a batch it took off compileQueue_ into tasks.
+	bool compileScheduling_ = false;
 
 	// Thread for measuring presentation delay.
 	std::thread presentWaitThread_;

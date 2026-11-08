@@ -17,7 +17,6 @@
 
 #include "Common/GPU/Shader.h"
 #include "Common/GPU/ShaderWriter.h"
-#include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "GPU/Common/StencilCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
@@ -162,6 +161,173 @@ void GenerateStencilVs(char *buffer, const ShaderLanguageDesc &lang) {
 	writer.EndVSMain(varyings);
 }
 
+void FramebufferManagerCommon::EnsureStencilWritePipeline(bool useExportShader) {
+	if (stencilWritePipeline_) {
+		return;
+	}
+
+	using namespace Draw;
+	const ShaderLanguageDesc &shaderLanguageDesc = draw_->GetShaderLanguageDesc();
+
+	char *fsCode = new char[8192];
+	char *vsCode = new char[8192];
+	GenerateStencilFs(fsCode, shaderLanguageDesc, draw_->GetBugs(), useExportShader);
+	GenerateStencilVs(vsCode, shaderLanguageDesc);
+
+	_assert_msg_(strlen(fsCode) < 8192, "StenFS length error: %d", (int)strlen(fsCode));
+	_assert_msg_(strlen(vsCode) < 8192, "StenVS length error: %d", (int)strlen(vsCode));
+
+	ShaderModule *stencilUploadFs = draw_->CreateShaderModule(ShaderStage::Fragment, shaderLanguageDesc.shaderLanguage, (const uint8_t *)fsCode, strlen(fsCode), "stencil_fs");
+	ShaderModule *stencilUploadVs = draw_->CreateShaderModule(ShaderStage::Vertex, shaderLanguageDesc.shaderLanguage, (const uint8_t *)vsCode, strlen(vsCode), "stencil_vs");
+
+	_assert_(stencilUploadFs && stencilUploadVs);
+
+	InputLayoutDesc desc = {
+		8,
+		{
+			{ SEM_POSITION, DataFormat::R32G32_FLOAT, 0 },
+		},
+	};
+	InputLayout *inputLayout = draw_->CreateInputLayout(desc);
+
+	BlendState *blendOff = draw_->CreateBlendState({ false, 0x8 });
+	DepthStencilStateDesc dsDesc{};
+	dsDesc.stencilEnabled = true;
+	dsDesc.stencil.compareOp = Comparison::ALWAYS;
+	dsDesc.stencil.depthFailOp = StencilOp::REPLACE;
+	dsDesc.stencil.failOp = StencilOp::REPLACE;
+	dsDesc.stencil.passOp = StencilOp::REPLACE;
+	DepthStencilState *stencilWrite = draw_->CreateDepthStencilState(dsDesc);
+	RasterState *rasterNoCull = draw_->CreateRasterState({});
+
+	PipelineDesc stencilWriteDesc{
+		Primitive::TRIANGLE_LIST,
+		{ stencilUploadVs, stencilUploadFs },
+		inputLayout, stencilWrite, blendOff, rasterNoCull, &stencilUBDesc,
+	};
+	stencilWritePipeline_ = draw_->CreateGraphicsPipeline(stencilWriteDesc, "stencil_upload");
+	_assert_(stencilWritePipeline_);
+
+	delete[] fsCode;
+	delete[] vsCode;
+
+	rasterNoCull->Release();
+	blendOff->Release();
+	stencilWrite->Release();
+	inputLayout->Release();
+
+	stencilUploadFs->Release();
+	stencilUploadVs->Release();
+
+	SamplerStateDesc descNearest{};
+	stencilWriteSampler_ = draw_->CreateSamplerState(descNearest);
+}
+
+// Draws the stencil write pipeline over the whole target, with the source's alpha bound as the texture.
+void FramebufferManagerCommon::DrawStencilWritePasses(GEBufferFormat format, int values, u8 usedBits, bool useExportShader) {
+	// Fullscreen triangle coordinates.
+	static const float positions[6] = {
+		0.0, 0.0,
+		1.0, 0.0,
+		0.0, 1.0,
+	};
+
+	if (useExportShader) {
+		// We only need to do one pass if using an export shader.
+		StencilUB ub{};
+		draw_->SetStencilParams(0xFF, 0xFF, 0xFF);
+		draw_->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+		draw_->DrawUP(positions, 3);
+		return;
+	}
+
+	for (int i = 1; i < values; i += i) {
+		if (!(usedBits & i)) {
+			// It's already zero, let's skip it.
+			continue;
+		}
+		StencilUB ub{};
+		if (format == GE_FORMAT_4444) {
+			draw_->SetStencilParams(0xFF, (i << 4) | i, 0xFF);
+			ub.stencilValue = i * (16.0f / 255.0f);
+		} else if (format == GE_FORMAT_5551) {
+			draw_->SetStencilParams(0xFF, 0xFF, 0xFF);
+			ub.stencilValue = i * (128.0f / 255.0f);
+		} else {
+			draw_->SetStencilParams(0xFF, i, 0xFF);
+			ub.stencilValue = i * (1.0f / 255.0f);
+		}
+		draw_->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
+		draw_->DrawUP(positions, 3);
+	}
+}
+
+// On the PSP the stencil is the alpha bits, so after reinterpreting the colors of another format into a buffer, its
+// stencil has to follow the new alpha (Ultimate Ghosts 'n Goblins sets 5551 alpha through a masked 565 blue write,
+// then stencil tests on it).
+void FramebufferManagerCommon::WriteStencilFromFramebufferAlpha(VirtualFramebuffer *dst) {
+	using namespace Draw;
+
+	int values = 0;
+	switch (dst->fb_format) {
+	case GE_FORMAT_5551: values = 2; break;
+	case GE_FORMAT_4444: values = 16; break;
+	case GE_FORMAT_8888: values = 256; break;
+	default: return;
+	}
+	if (!dst->fbo) {
+		return;
+	}
+
+	const bool useExportShader = draw_->GetDeviceCaps().fragmentShaderStencilWriteSupported;
+	EnsureStencilWritePipeline(useExportShader);
+
+	// The source can't be the target, so read the alpha from a copy.
+	const int w = dst->renderWidth;
+	const int h = dst->renderHeight;
+	Framebuffer *copy = GetTempFBO(TempFBO::COPY, w, h);
+	BlitUsingRaster(dst->fbo, 0.0f, 0.0f, (float)w, (float)h, copy, 0.0f, 0.0f, (float)w, (float)h, false, dst->renderScaleFactor, Get2DPipeline(DRAW2D_COPY_COLOR), "StencilFromAlpha_Copy");
+
+	draw_->BindFramebufferAsRenderTarget(dst->fbo, { RPAction::KEEP, RPAction::KEEP, RPAction::CLEAR }, "StencilFromAlpha");
+	Viewport viewport = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+	draw_->SetViewport(viewport);
+	draw_->SetScissorRect(0, 0, w, h);
+	draw_->BindFramebufferAsTexture(copy, TEX_SLOT_PSP_TEXTURE, Aspect::COLOR_BIT, 0);
+	draw_->BindSamplerStates(TEX_SLOT_PSP_TEXTURE, 1, &stencilWriteSampler_);
+	draw_->BindPipeline(stencilWritePipeline_);
+	DrawStencilWritePasses(dst->fb_format, values, 0xFF, useExportShader);
+
+	textureCache_->ForgetLastTexture();
+	draw_->Invalidate(InvalidationFlags::CACHED_RENDER_STATE);
+	gstate_c.Dirty(DIRTY_ALL_RENDER_STATE);
+}
+
+void FramebufferManagerCommon::RebuildPendingStencil(VirtualFramebuffer *vfb) {
+	// Without the stencil test, draws don't write the stencil. Clears do, but often only part of it.
+	if (!gstate.isStencilTestEnabled() || gstate.isModeClear()) {
+		return;
+	}
+	// A draw that writes the stencil without reading it, where it also writes the alpha, keeps the two in step,
+	// so the rebuild can wait for a draw that reads it (God of War zeroes it every frame). It can't wait past
+	// a stencil write where the color isn't written: a failed stencil or depth test.
+	const GEComparison func = gstate.getStencilTestFunction();
+	const GEStencilOp sFail = gstate.getStencilOpSFail();
+	const GEStencilOp zFail = gstate.getStencilOpZFail();
+	const GEStencilOp zPass = gstate.getStencilOpZPass();
+	const bool readsStencil = (func != GE_COMP_ALWAYS && func != GE_COMP_NEVER) ||
+		sFail >= GE_STENCILOP_INVERT || zFail >= GE_STENCILOP_INVERT || zPass >= GE_STENCILOP_INVERT;
+	const bool writesWithoutColor = (func == GE_COMP_NEVER && sFail != GE_STENCILOP_KEEP) ||
+		(func != GE_COMP_NEVER && gstate.isDepthTestEnabled() && zFail != GE_STENCILOP_KEEP);
+	if (!readsStencil && !writesWithoutColor) {
+		return;
+	}
+	vfb->stencilFromAlphaPending = false;
+	drawEngine_->Flush();
+	WriteStencilFromFramebufferAlpha(vfb);
+	// It reused the temp buffer a self-texturing copy is kept in.
+	DiscardFramebufferCopy();
+}
+
 bool FramebufferManagerCommon::PerformWriteStencilFromMemory(u32 addr, int size, WriteStencil flags) {
 	using namespace Draw;
 
@@ -194,6 +360,9 @@ bool FramebufferManagerCommon::PerformWriteStencilFromMemory(u32 addr, int size,
 	if (!CheckStencilBits(src, dstBuffer, values, usedBits))
 		return false;
 
+	dstBuffer->stencilFromAlphaPending = false;
+	DiscardFramebufferCopy();
+
 	if (usedBits == 0) {
 		if (flags & WriteStencil::STENCIL_IS_ZERO) {
 			// Common when creating buffers, it's already 0.
@@ -212,69 +381,7 @@ bool FramebufferManagerCommon::PerformWriteStencilFromMemory(u32 addr, int size,
 
 	textureCache_->ForgetLastTexture();
 
-	if (!stencilWritePipeline_) {
-		const ShaderLanguageDesc &shaderLanguageDesc = draw_->GetShaderLanguageDesc();
-
-		char *fsCode = new char[8192];
-		char *vsCode = new char[8192];
-		GenerateStencilFs(fsCode, shaderLanguageDesc, draw_->GetBugs(), useExportShader);
-		GenerateStencilVs(vsCode, shaderLanguageDesc);
-
-		_assert_msg_(strlen(fsCode) < 8192, "StenFS length error: %d", (int)strlen(fsCode));
-		_assert_msg_(strlen(vsCode) < 8192, "StenVS length error: %d", (int)strlen(vsCode));
-
-		ShaderModule *stencilUploadFs = draw_->CreateShaderModule(ShaderStage::Fragment, shaderLanguageDesc.shaderLanguage, (const uint8_t *)fsCode, strlen(fsCode), "stencil_fs");
-		ShaderModule *stencilUploadVs = draw_->CreateShaderModule(ShaderStage::Vertex, shaderLanguageDesc.shaderLanguage, (const uint8_t *)vsCode, strlen(vsCode), "stencil_vs");
-
-		_assert_(stencilUploadFs && stencilUploadVs);
-
-		InputLayoutDesc desc = {
-			8,
-			{
-				{ SEM_POSITION, DataFormat::R32G32_FLOAT, 0 },
-			},
-		};
-		InputLayout *inputLayout = draw_->CreateInputLayout(desc);
-
-		BlendState *blendOff = draw_->CreateBlendState({ false, 0x8 });
-		DepthStencilStateDesc dsDesc{};
-		dsDesc.stencilEnabled = true;
-		dsDesc.stencil.compareOp = Comparison::ALWAYS;
-		dsDesc.stencil.depthFailOp = StencilOp::REPLACE;
-		dsDesc.stencil.failOp = StencilOp::REPLACE;
-		dsDesc.stencil.passOp = StencilOp::REPLACE;
-		DepthStencilState *stencilWrite = draw_->CreateDepthStencilState(dsDesc);
-		RasterState *rasterNoCull = draw_->CreateRasterState({});
-
-		PipelineDesc stencilWriteDesc{
-			Primitive::TRIANGLE_LIST,
-			{ stencilUploadVs, stencilUploadFs },
-			inputLayout, stencilWrite, blendOff, rasterNoCull, &stencilUBDesc,
-		};
-		stencilWritePipeline_ = draw_->CreateGraphicsPipeline(stencilWriteDesc, "stencil_upload");
-		_assert_(stencilWritePipeline_);
-
-		delete[] fsCode;
-		delete[] vsCode;
-
-		rasterNoCull->Release();
-		blendOff->Release();
-		stencilWrite->Release();
-		inputLayout->Release();
-
-		stencilUploadFs->Release();
-		stencilUploadVs->Release();
-
-		SamplerStateDesc descNearest{};
-		stencilWriteSampler_ = draw_->CreateSamplerState(descNearest);
-	}
-
-	// Fullscreen triangle coordinates.
-	static const float positions[6] = {
-		0.0, 0.0,
-		1.0, 0.0,
-		0.0, 1.0,
-	};
+	EnsureStencilWritePipeline(useExportShader);
 
 	bool useBlit = draw_->GetDeviceCaps().framebufferStencilBlitSupported;
 
@@ -322,38 +429,16 @@ bool FramebufferManagerCommon::PerformWriteStencilFromMemory(u32 addr, int size,
 	draw_->SetScissorRect(0, 0, w, h);
 	draw_->BindPipeline(stencilWritePipeline_);
 
-	if (useExportShader) {
-		// We only need to do one pass if using an export shader.
-		StencilUB ub{};
-		draw_->SetStencilParams(0xFF, 0xFF, 0xFF);
-		draw_->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
-		draw_->DrawUP(positions, 3);
-	} else {
-		for (int i = 1; i < values; i += i) {
-			if (!(usedBits & i)) {
-				// It's already zero, let's skip it.
-				continue;
-			}
-			StencilUB ub{};
-			if (dstBuffer->fb_format == GE_FORMAT_4444) {
-				draw_->SetStencilParams(0xFF, (i << 4) | i, 0xFF);
-				ub.stencilValue = i * (16.0f / 255.0f);
-			} else if (dstBuffer->fb_format == GE_FORMAT_5551) {
-				draw_->SetStencilParams(0xFF, 0xFF, 0xFF);
-				ub.stencilValue = i * (128.0f / 255.0f);
-			} else {
-				draw_->SetStencilParams(0xFF, i, 0xFF);
-				ub.stencilValue = i * (1.0f / 255.0f);
-			}
-			draw_->UpdateDynamicUniformBuffer(&ub, sizeof(ub));
-			draw_->DrawUP(positions, 3);
-		}
-	}
+	DrawStencilWritePasses(dstBuffer->fb_format, values, usedBits, useExportShader);
 
 	if (useBlit) {
 		// Note that scissors don't affect blits on other APIs than OpenGL, so might want to try to get rid of this.
 		draw_->SetScissorRect(0, 0, dstBuffer->renderWidth, dstBuffer->renderHeight);
 		draw_->BlitFramebuffer(blitFBO, 0, 0, w, h, dstBuffer->fbo, 0, 0, dstBuffer->renderWidth, dstBuffer->renderHeight, Draw::Aspect::STENCIL_BIT, Draw::FB_BLIT_NEAREST, "WriteStencilFromMemory_Blit");
+		RebindFramebuffer("RebindFramebuffer - Stencil");
+	} else if (dstBuffer != currentRenderVfb_) {
+		// dstBuffer is bound as the target now, and the draws after this don't all rebind the current one: with
+		// framebuffer fetch, OutRun 2006's masked draws make no copy of the target that would, and landed in dstBuffer.
 		RebindFramebuffer("RebindFramebuffer - Stencil");
 	}
 

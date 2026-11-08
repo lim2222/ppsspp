@@ -142,6 +142,46 @@ void InitLibretroVFS(const struct retro_vfs_interface_info *vfs) noexcept {
 }
 #endif
 
+// For callers that look at errno, as they do with native paths.
+static int ErrnoFromStorageError(StorageError error) {
+	switch (error) {
+	case StorageError::SUCCESS: return 0;
+	case StorageError::NOT_FOUND: return ENOENT;
+	case StorageError::DISK_FULL: return ENOSPC;
+	case StorageError::ALREADY_EXISTS: return EEXIST;
+	default: return EIO;
+	}
+}
+
+// Opens a content URI for writing, creating the file if it's missing. Opening first saves the existence check
+// when the file is there, the usual case. Creating never leaves a numbered duplicate: given a taken name,
+// Android_CreateFile fails with ALREADY_EXISTS (someone created it meanwhile), and then we just open it.
+static int OpenContentUriForWrite(const Path &path, Android_OpenContentUriMode mode) {
+	int fd = Android_OpenContentUriFd(path.ToString(), mode);
+	if (fd >= 0 || StorageErrorFromInt(fd) != StorageError::NOT_FOUND) {
+		if (fd < 0) {
+			errno = ErrnoFromStorageError(StorageErrorFromInt(fd));
+		}
+		return fd;
+	}
+	if (!path.CanNavigateUp()) {
+		errno = ENOENT;
+		return -1;
+	}
+	const Path parent = path.NavigateUp();
+	const StorageError created = Android_CreateFile(parent.ToString(), path.GetFilename());
+	if (created != StorageError::SUCCESS && created != StorageError::ALREADY_EXISTS) {
+		WARN_LOG(Log::IO, "Failed to create '%s' in '%s': %s", path.GetFilename().c_str(), parent.c_str(), Android_ErrorToString(created));
+		errno = ErrnoFromStorageError(created);
+		return -1;
+	}
+	fd = Android_OpenContentUriFd(path.ToString(), mode);
+	if (fd < 0) {
+		errno = ErrnoFromStorageError(StorageErrorFromInt(fd));
+	}
+	return fd;
+}
+
 FILE *OpenCFile(const Path &path, const char *mode) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "OpenCFile %s, %s", path.c_str(), mode);
@@ -160,31 +200,11 @@ FILE *OpenCFile(const Path &path, const char *mode) {
 			// Read, let's support this - easy one.
 			int descriptor = Android_OpenContentUriFd(path.ToString(), Android_OpenContentUriMode::READ);
 			if (descriptor < 0) {
+				errno = ErrnoFromStorageError(StorageErrorFromInt(descriptor));
 				return nullptr;
 			}
 			return fdopen(descriptor, "rb");
 		} else if (!strcmp(mode, "w") || !strcmp(mode, "wb") || !strcmp(mode, "wt") || !strcmp(mode, "at") || !strcmp(mode, "a")) {
-			// Need to be able to create the file here if it doesn't exist.
-			// NOTE: The existance check is important, otherwise Android will create a numbered file by the side!
-			// This is also a terrible possible data race, ugh. Anyway...
-			// Not exactly sure which abstractions are best, let's start simple.
-			if (!File::Exists(path)) {
-				DEBUG_LOG(Log::IO, "OpenCFile(%s): Opening content file for write. Doesn't exist, creating empty and reopening.", path.c_str());
-				std::string name = path.GetFilename();
-				if (path.CanNavigateUp()) {
-					Path parent = path.NavigateUp();
-					if (Android_CreateFile(parent.ToString(), name) != StorageError::SUCCESS) {
-						WARN_LOG(Log::IO, "Failed to create file '%s' in '%s'", name.c_str(), parent.c_str());
-						return nullptr;
-					}
-				} else {
-					INFO_LOG(Log::IO, "Failed to navigate up to create file: %s", path.c_str());
-					return nullptr;
-				}
-			} else {
-				DEBUG_LOG(Log::IO, "OpenCFile(%s): Opening existing content file for write (truncating). Requested mode: '%s'", path.c_str(), mode);
-			}
-
 			// TODO: Support append modes and stuff... For now let's go with the most common one.
 			Android_OpenContentUriMode openMode = Android_OpenContentUriMode::READ_WRITE_TRUNCATE;
 			const char *fmode = "wb";
@@ -192,7 +212,7 @@ FILE *OpenCFile(const Path &path, const char *mode) {
 				openMode = Android_OpenContentUriMode::READ_WRITE;
 				fmode = "ab";
 			}
-			int descriptor = Android_OpenContentUriFd(path.ToString(), openMode);
+			int descriptor = OpenContentUriForWrite(path, openMode);
 			if (descriptor < 0) {
 				INFO_LOG(Log::IO, "Opening '%s' for write failed", path.ToString().c_str());
 				return nullptr;
@@ -284,29 +304,6 @@ int OpenFD(const Path &path, OpenFlag flags) {
 		return -1;
 	}
 
-	bool knownExists = false;
-
-	if (flags & OPEN_CREATE) {
-		if (!File::Exists(path)) {
-			INFO_LOG(Log::IO, "OpenFD(%s): Creating file.", path.c_str());
-			std::string name = path.GetFilename();
-			if (path.CanNavigateUp()) {
-				Path parent = path.NavigateUp();
-				if (Android_CreateFile(parent.ToString(), name) != StorageError::SUCCESS) {
-					WARN_LOG(Log::IO, "OpenFD: Failed to create file '%s' in '%s'", name.c_str(), parent.c_str());
-					return -1;
-				}
-				knownExists = true;
-			} else {
-				INFO_LOG(Log::IO, "Failed to navigate up to create file: %s", path.c_str());
-				return -1;
-			}
-		} else {
-			INFO_LOG(Log::IO, "OpenCFile(%s): Opening existing content file ('%s')", path.c_str(), OpenFlagToString(flags).c_str());
-			knownExists = true;
-		}
-	}
-
 	Android_OpenContentUriMode mode;
 	if (flags == OPEN_READ) {  // Intentionally not a bitfield check.
 		mode = Android_OpenContentUriMode::READ;
@@ -324,14 +321,17 @@ int OpenFD(const Path &path, OpenFlag flags) {
 	}
 
 	DEBUG_LOG(Log::IO, "Android_OpenContentUriFd: %s (%s)", path.c_str(), OpenFlagToString(flags).c_str());
-	int descriptor = Android_OpenContentUriFd(path.ToString(), mode);
-	if (descriptor < 0) {
-		// File probably just doesn't exist. No biggie.
-		if (knownExists) {
-			ERROR_LOG(Log::IO, "Android_OpenContentUriFd failed for existing file: '%s'", path.c_str());
-		} else {
-			INFO_LOG(Log::IO, "Android_OpenContentUriFd failed, probably doesn't exist: '%s'", path.c_str());
+	int descriptor;
+	if (flags & OPEN_CREATE) {
+		descriptor = OpenContentUriForWrite(path, mode);
+	} else {
+		descriptor = Android_OpenContentUriFd(path.ToString(), mode);
+		if (descriptor < 0) {
+			errno = ErrnoFromStorageError(StorageErrorFromInt(descriptor));
 		}
+	}
+	if (descriptor < 0) {
+		INFO_LOG(Log::IO, "Opening '%s' (%s) failed: %s", path.c_str(), OpenFlagToString(flags).c_str(), strerror(errno));
 	} else if (flags & OPEN_APPEND) {
 		// Simply seek to the end of the file to simulate append mode.
 		lseek(descriptor, 0, SEEK_END);
@@ -703,7 +703,9 @@ bool CreateDir(const Path &path, bool quiet) {
 	}
 	return false;
 #else
-	if (mkdir(path.ToString().c_str(), 0755) == 0) {
+	if (mkdir(path.ToString().c_str(), 0775) == 0) {
+		// mkdir's mode is masked by the umask, chmod's isn't.
+		chmod(path.ToString().c_str(), 0775);
 		return true;
 	}
 
@@ -712,6 +714,8 @@ bool CreateDir(const Path &path, bool quiet) {
 		if (!quiet) {
 			DEBUG_LOG(Log::IO, "CreateDir: mkdir failed on %s: already exists", path.c_str());
 		}
+		// Don't touch the permissions of existing directories: CreateFullPath calls this
+		// on every component of a path, including the user's home directory.
 		return true;
 	}
 
@@ -726,6 +730,14 @@ bool CreateDir(const Path &path, bool quiet) {
 bool CreateFullPath(const Path &path) {
 	if (File::Exists(path)) {
 		VERBOSE_LOG(Log::IO, "CreateFullPath: path exists %s", path.ToVisualString().c_str());
+#if !defined(HAVE_LIBRETRO_VFS) && !defined(_WIN32)
+		// Repair directories created with older, narrower permissions. Only the last
+		// component, the parents can be anything (like the user's home directory).
+		struct stat info;
+		if (path.Type() == PathType::NATIVE && stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+			chmod(path.c_str(), 0775);
+		}
+#endif
 		return true;
 	}
 
@@ -745,11 +757,17 @@ bool CreateFullPath(const Path &path) {
 
 	// The below code is entirely agnostic of path format.
 
-	Path root = path.GetRootVolume();
-
 	std::string diff;
-	if (!root.ComputePathTo(path, diff)) {
-		return false;
+	Path curPath;
+	if (path.IsAbsolute()) {
+		curPath = path.GetRootVolume();
+		if (!curPath.ComputePathTo(path, diff)) {
+			return false;
+		}
+	} else {
+		// Relative to the current directory, so every component may need creating. GetRootVolume()
+		// can't help here: it hands back the whole path, which left nothing to create.
+		diff = path.ToString();
 	}
 
 	std::vector<std::string_view> parts;
@@ -763,9 +781,9 @@ bool CreateFullPath(const Path &path) {
 		return false;
 	}
 
-	Path curPath = root;
 	for (auto part : parts) {
-		curPath /= part;
+		// Path("") / "a" would be "/a".
+		curPath = curPath.empty() ? Path(std::string(part)) : curPath / part;
 		File::CreateDir(curPath);
 	}
 
@@ -1527,8 +1545,40 @@ bool WriteDataToFile(bool text_file, const void* data, size_t size, const Path &
 		fclose(f);
 		return false;
 	}
-	fclose(f);
-	return true;
+	// A full disk can show up only here, when the buffer is flushed.
+	return fclose(f) == 0;
+}
+
+bool WriteDataToNewFile(const void *data, size_t size, const Path &filename) {
+#if PPSSPP_PLATFORM(ANDROID) && !defined(HAVE_LIBRETRO_VFS)
+	if (filename.Type() == PathType::CONTENT_URI) {
+		if (!filename.CanNavigateUp() || Android_CreateFile(filename.NavigateUp().ToString(), filename.GetFilename()) != StorageError::SUCCESS) {
+			return false;
+		}
+		const int fd = Android_OpenContentUriFd(filename.ToString(), Android_OpenContentUriMode::READ_WRITE_TRUNCATE);
+		if (fd < 0) {
+			return false;
+		}
+		const u8 *p = (const u8 *)data;
+		size_t left = size;
+		int interrupts = 0;
+		while (left > 0) {
+			const ssize_t written = write(fd, p, left);
+			if (written < 0 && errno == EINTR && ++interrupts < 100) {
+				continue;
+			}
+			if (written <= 0) {
+				close(fd);
+				return false;
+			}
+			p += written;
+			left -= written;
+			interrupts = 0;
+		}
+		return close(fd) == 0;
+	}
+#endif
+	return WriteDataToFile(false, data, size, filename);
 }
 
 void ChangeMTime(const Path &path, time_t mtime) {

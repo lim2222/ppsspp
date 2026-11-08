@@ -23,6 +23,10 @@ public class ImageResultProxyActivity extends AppCompatActivity {
 
 	private String copyAndDownscaleToCache(Uri selectedImage) {
 		Log.i(TAG, "Selected image: " + selectedImage);
+		if (selectedImage == null) {
+			Log.e(TAG, "No image URI in the result");
+			return null;
+		}
 		File cacheDir = getExternalCacheDir();
 		if (cacheDir == null) {
 			Log.e(TAG, "External cache directory not available");
@@ -104,7 +108,9 @@ public class ImageResultProxyActivity extends AppCompatActivity {
 			String returnPath = tempFile.getAbsolutePath();
 			Log.i(TAG, "Return path: " + returnPath);
 			return returnPath;
-		} catch (IOException e) {
+		} catch (IOException | RuntimeException | OutOfMemoryError e) {
+			// We're in the app's process, so anything uncaught here (SecurityException from a provider, a huge bitmap)
+			// takes the whole app down.
 			Log.e(TAG, "Error processing image: " + e.getMessage());
 			e.printStackTrace();
 			return null;
@@ -140,7 +146,13 @@ public class ImageResultProxyActivity extends AppCompatActivity {
 
 				String localPath;
 				if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-					localPath = copyAndDownscaleToCache(result.getData().getData());
+					Intent data = result.getData();
+					Uri uri = data.getData();
+					// Some pickers only return a ClipData.
+					if (uri == null && data.getClipData() != null && data.getClipData().getItemCount() > 0) {
+						uri = data.getClipData().getItemAt(0).getUri();
+					}
+					localPath = copyAndDownscaleToCache(uri);
 				} else {
 					localPath = null;
 				}

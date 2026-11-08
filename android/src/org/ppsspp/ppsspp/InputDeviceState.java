@@ -187,10 +187,12 @@ public class InputDeviceState {
 		if (isInvalidKeyCode(keyCode) && isEventSentByNintendoSwitchLeftJoyCon(event)) {
 			int remappedKeyCode = remapNintendoSwitchLeftJoyConKeyCodeFromScanCode(event.getScanCode());
 			if (remappedKeyCode != 0) {
+				pressedKeys.remove(remappedKeyCode);
 				return NativeApp.keyUp(deviceId, remappedKeyCode);
 			}
 		}
 
+		pressedKeys.remove(keyCode);
 		return NativeApp.keyUp(deviceId, keyCode);
 	}
 
@@ -218,7 +220,11 @@ public class InputDeviceState {
 	}
 
 	private boolean isEventSentByNintendoSwitchLeftJoyCon(KeyEvent event) {
-		return event.getDevice().getName().contains("Nintendo Switch Left Joy-Con");
+		InputDevice device = event.getDevice();
+		if (device == null || device.getName() == null) {
+			return false;
+		}
+		return device.getName().contains("Nintendo Switch Left Joy-Con");
 	}
 
 	private int remapNintendoSwitchLeftJoyConKeyCodeFromScanCode(int scanCode) {

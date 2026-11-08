@@ -24,6 +24,7 @@
 
 #include "Common/Common.h"
 #include "Common/UI/Screen.h"  // for DialogResult
+#include "Common/Render/DrawEnum.h"  // for RoundCorners
 
 #undef small
 
@@ -40,6 +41,8 @@ namespace Draw {
 	class Texture;
 }
 
+// pre-declare.
+enum class RoundCorners : uint8_t;
 
 // I don't generally like namespaces but I think we do need one for UI, so many potentially-clashing names.
 namespace UI {
@@ -116,6 +119,9 @@ struct Theme {
 	uint32_t scrollbarColor;
 	uint32_t popupSliderColor;
 	uint32_t popupSliderFocusedColor;
+
+	// TODO: Should it be here?
+	float choiceRoundRadius = 16.0f;
 };
 
 // The four cardinal directions should be enough, plus Prev/Next in "element order".
@@ -396,6 +402,8 @@ public:
 	virtual std::string DescribeLog() const;
 	// Accessible/searchable description.
 	virtual std::string DescribeText() const { return ""; }
+	// Extra text that search also matches against, available even before DescribeText is (like a filename).
+	virtual std::string SearchAlias() const { return ""; }
 
 	virtual void FocusChanged(FocusFlags focusFlags) {}
 	virtual void PersistData(PersistStatus status, std::string anonId, PersistMap &storage);
@@ -427,6 +435,9 @@ public:
 	virtual bool CanBeFocused() const { return true; }
 	virtual bool SubviewFocused(View *view) { return false; }
 	virtual bool CanMoveFocus(FocusMove dir) const { return true; }
+
+	virtual void SetRoundCorners(RoundCorners corners = RoundCorners::All) { roundCorners_ = corners; }
+	virtual RoundCorners GetRoundCorners() const { return roundCorners_; }
 
 	void SetPopupStyle(bool popupStyle) { popupStyle_ = popupStyle; }
 
@@ -462,12 +473,24 @@ public:
 		enabledPtr_ = disabled;
 		enabledMeansDisabled_ = true;
 	}
+	// The bool set by SetEnabledPtr or SetDisabledPtr (*meansDisabled says which), or null.
+	const bool *GetEnabledPtr(bool *meansDisabled) const {
+		*meansDisabled = enabledMeansDisabled_;
+		return enabledPtr_;
+	}
+	// Shown when the user tries to activate the view while it's disabled, instead of the
+	// message worked out from the enabled pointer (see SetDisabledActivationCallback).
+	void SetDisabledReason(std::string_view reason) { disabledReason_ = reason; }
+	const std::string &GetDisabledReason() const { return disabledReason_; }
 
 	virtual void SetVisibility(Visibility visibility) { visibility_ = visibility; }
 	Visibility GetVisibility() const { return visibility_; }
 
 	const std::string &Tag() const { return tag_; }
 	void SetTag(std::string_view str) { tag_ = str; }
+
+	// The group this view was added to, if any.
+	ViewGroup *Parent() const { return parent_; }
 
 	// Fake RTTI
 	virtual bool IsViewGroup() const { return false; }
@@ -514,13 +537,18 @@ protected:
 	bool popupStyle_ = false;
 	bool hasAutoResult_ = false;
 	DialogResult autoResult_ = DR_OK;
+	RoundCorners roundCorners_ = RoundCorners::None;  // In the end this will be All, but we're not ready yet.
 
 private:
+	friend class ViewGroup;  // Sets parent_.
+	ViewGroup *parent_ = nullptr;
+
 	std::function<bool()> enabledFunc_;
 	bool *enabledPtr_ = nullptr;
 	bool enabled_ = true;
 	bool enabledMeansDisabled_ = false;
 	bool alwaysVisibleInSearch_ = false;
+	std::string disabledReason_;
 
 	DISALLOW_COPY_AND_ASSIGN(View);
 };
@@ -536,7 +564,6 @@ public:
 	bool CanBeFocused() const override { return false; }
 };
 
-
 // All these light up their background when touched, or have focus.
 class Clickable : public View {
 public:
@@ -547,6 +574,9 @@ public:
 
 	void FocusChanged(FocusFlags focusFlags) override;
 
+	// Outlines it, to point it out without the keyboard focus (which would turn on keyboard navigation).
+	void SetHighlighted(bool highlighted) { highlighted_ = highlighted; }
+
 	Event OnClick;
 
 protected:
@@ -554,13 +584,16 @@ protected:
 	// the event.
 	// Use it for checking/unchecking checkboxes, etc.
 	virtual void ClickInternal();
-	void DrawBG(UIContext &dc, const Style &style);
+	void DrawBG(UIContext &dc, const Style &style, float radius);
 
 	CallbackColorTween *bgColor_ = nullptr;
 	float bgColorLast_ = 0.0f;
 	int downCountDown_ = 0;
 	bool dragging_ = false;
 	bool down_ = false;
+	bool highlighted_ = false;
+	// A touch went down on this while disabled.
+	bool disabledTap_ = false;
 };
 
 // TODO: Very similar to Choice, should probably merge them.
@@ -603,26 +636,6 @@ private:
 	int paddingH_ = 8;
 	float scale_ = 1.0f;
 	bool ignoreText_ = false;
-};
-
-class RadioButton : public Clickable {
-public:
-	RadioButton(int *value, int thisButtonValue, std::string_view text, LayoutParams *layoutParams = 0)
-		: Clickable(layoutParams), value_(value), thisButtonValue_(thisButtonValue), text_(text) {}
-	void Draw(UIContext &dc) override;
-	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
-	std::string DescribeText() const override;
-
-private:
-	void ClickInternal() override;
-	int *value_;
-	int thisButtonValue_;
-	std::string text_;
-	const float paddingW_ = 8;
-	const float paddingH_ = 4;
-
-	const float radioRadius_ = 16.0f;
-	const float radioInnerRadius_ = 8.0f;
 };
 
 class Slider : public Clickable {
@@ -728,9 +741,34 @@ class ClickableItem : public Clickable {
 public:
 	ClickableItem(LayoutParams *layoutParams);
 	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
+	void Measure(const UIContext &dc, MeasureSpec horiz, MeasureSpec vert) override;
 
 	// Draws the item background.
 	void Draw(UIContext &dc) override;
+
+	// Small explanatory text under the item, part of it (highlighted and clicked along with it).
+	// Drawn by Choice and CheckBox and RadioButton.
+	void SetHintText(std::string_view text) {
+		hintText_ = text;
+	}
+	const std::string &GetHintText() const {
+		return hintText_;
+	}
+
+protected:
+	// The item's bounds without the hint below.
+	Bounds ContentBounds() const {
+		Bounds b = bounds_;
+		b.h -= hintHeight_;
+		return b;
+	}
+	void DrawHint(UIContext &dc, const Style &style) const;
+	// Where the hint starts, from the item's left edge. Items whose text doesn't start at the
+	// default padding override this, to line the hint up with it.
+	virtual float HintIndent() const;
+
+	std::string hintText_;
+	float hintHeight_ = 0.0f;
 };
 
 // Use to trigger something or open a submenu screen.
@@ -749,6 +787,7 @@ public:
 
 	void GetContentDimensionsBySpec(const UIContext &dc, MeasureSpec horiz, MeasureSpec vert, float &w, float &h) const override;
 	void Draw(UIContext &dc) override;
+
 	std::string DescribeText() const override;
 	void SetCentered(bool c) {
 		centered_ = c;
@@ -766,6 +805,7 @@ public:
 		rightIconFlipH_ = flipH;
 		rightIconImage_ = iconImage;
 	}
+
 	// Only useful for things that extend Choice.
 	void SetHideTitle(bool hide) {
 		hideTitle_ = hide;
@@ -915,12 +955,9 @@ private:
 
 class PopupHeader : public Item {
 public:
-	PopupHeader(std::string_view text, LayoutParams *layoutParams = 0)
-		: Item(layoutParams), text_(text) {
-			layoutParams_->width = FILL_PARENT;
-			layoutParams_->height = 64;
-	}
+	PopupHeader(std::string_view text, LayoutParams *layoutParams = 0);
 	void Draw(UIContext &dc) override;
+	void GetContentDimensionsBySpec(const UIContext &dc, MeasureSpec horiz, MeasureSpec vert, float &w, float &h) const override;
 	std::string DescribeText() const override;
 
 private:
@@ -956,6 +993,30 @@ protected:
 	std::string text_;
 	std::string smallText_;
 	ImageID imageID_;
+};
+
+class RadioButton : public ClickableItem {
+public:
+	RadioButton(int *value, int thisButtonValue, std::string_view text, LayoutParams *layoutParams = nullptr)
+		: ClickableItem(layoutParams), value_(value), thisButtonValue_(thisButtonValue), text_(text) {}
+	void Draw(UIContext &dc) override;
+	void GetContentDimensionsBySpec(const UIContext &dc, MeasureSpec horiz, MeasureSpec vert, float &w, float &h) const override;
+	void GetContentDimensions(const UIContext &dc, float &w, float &h) const override;
+	std::string DescribeText() const override;
+
+protected:
+	float HintIndent() const override { return paddingW_ * 2.0f + radioRadius_ * 2.0f; }
+
+private:
+	void ClickInternal() override;
+	int *value_;
+	int thisButtonValue_;
+	std::string text_;
+	// Same as CheckBox.
+	const float paddingW_ = 12;
+
+	// Half the size of the I_RADIO_* images.
+	const float radioRadius_ = 16.0f;
 };
 
 class CollapsibleHeader : public CheckBox {
@@ -1089,6 +1150,8 @@ public:
 	void SetBullet(bool bullet) { bullet_ = bullet; }
 	void SetPadding(Margins padding) { pad_ = padding; }
 	void SetAlign(int align) { textAlign_ = align; }
+	// Draws a thin rounded outline around the view. Use padding to keep the text off it.
+	TextView *SetFrame(bool frame) { frame_ = frame; return this; }
 	TextView *SetWordWrap();
 
 	bool CanBeFocused() const override { return focusable_; }
@@ -1103,6 +1166,7 @@ private:
 	bool focusable_ = false;
 	bool clip_ = true;
 	bool bullet_ = false;
+	bool frame_ = false;
 	Margins pad_{};
 };
 

@@ -4,6 +4,26 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <functional>
+
+#include "Common/File/Path.h"
+#include "Common/TimeUtil.h"
+
+// For benchmarks: calls fn over and over, callsPerBatch at a time between reads of the clock, for at
+// least the given number of seconds, and returns how many calls per second that came to. Multiply by
+// the work one call does (pixels, vertices) for a throughput.
+template <typename Func>
+double CallsPerSecond(Func fn, double seconds, int callsPerBatch) {
+	int calls = 0;
+	const double start = time_now_d();
+	do {
+		for (int i = 0; i < callsPerBatch; i++) {
+			fn();
+		}
+		calls += callsPerBatch;
+	} while (time_now_d() - start < seconds);
+	return calls / (time_now_d() - start);
+}
 
 inline bool rel_equal(float a, float b, float precision) {
 	float diff = fabsf(a - b);
@@ -24,9 +44,16 @@ inline bool rel_equal(float a, float b, float precision) {
 #define EXPECT_EQ_FLOAT(a, b) if ((a) != (b)) { printf("%s:%i: Test Fail\n%0.7f\nvs\n%0.7f\n", __FUNCTION__, __LINE__, a, b); return false; }
 #define EXPECT_APPROX_EQ_FLOAT(a, b) if (fabsf((a)-(b))>0.00001f) { printf("%s:%i: Test Fail\n%f\nvs\n%f\n", __FUNCTION__, __LINE__, a, b); /*return false;*/ }
 #define EXPECT_REL_EQ_FLOAT(a, b, precision) if (!rel_equal(a, b, precision)) { printf("%s:%i: Test Fail\n%0.9f\nvs\n%0.9f\n", __FUNCTION__, __LINE__, a, b); /*return false;*/ }
-#define EXPECT_EQ_STR(a, b) if (a != b) { printf("%s: Test Fail\n%s\nvs\n%s\n", __FUNCTION__, a.c_str(), b.c_str()); return false; }
+#define EXPECT_EQ_STR(a, b) if ((a) != (b)) { printf("%s: Test Fail\n%s\nvs\n%s\n", __FUNCTION__, (a).c_str(), (b).c_str()); return false; }
 #define EXPECT_EQ_MEM(a, b, sz) if (memcmp(a, b, sz) != 0) { printf("%s: Test Fail\n%.*s\nvs\n%.*s\n", __FUNCTION__, (int)sz, a, (int)sz, b); return false; }
 
 #define RET(a) if (!(a)) { return false; }
 
 extern bool g_testLog;
+
+// Where a test should put a file or directory it creates, so it doesn't land in the working directory.
+Path UnitTestTempPath(const char *name);
+
+// Calls check on a few million inputs chosen to make trouble for a VFPU dot product (see
+// UnitTest.cpp), and stops at the first false.
+bool ForEachVFPUDotTestCase(const std::function<bool(const float a[4], const float b[4])> &check);

@@ -244,6 +244,9 @@ void InitLibretroVFS(const struct retro_vfs_interface_info *vfs) noexcept;
 // Whole-file reading/writing
 bool WriteStringToFile(bool textFile, std::string_view str, const Path &filename);
 bool WriteDataToFile(bool textFile, const void* data, size_t size, const Path &filename);
+// For a file that's known not to exist yet. On Android content URIs, this saves a round trip to the
+// storage provider, and fails if the file does exist.
+bool WriteDataToNewFile(const void *data, size_t size, const Path &filename);
 
 bool ReadFileToStringOptions(bool textFile, bool allowShort, const Path &path, std::string *str);
 

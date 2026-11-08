@@ -38,6 +38,7 @@
 
 // TODO: Determine how many handlers we can actually have
 const size_t MAX_APCTL_HANDLERS = 32;
+const size_t MAX_APCTL_GAME_HANDLERS = 2; // Through sceNetApctlAddHandler (pspautotests net/inet/offline)
 
 typedef void(*sceNetApctlHandler)(int oldState, int newState, int event, int error, void* pArg);
 
@@ -104,9 +105,11 @@ extern const char * const defaultNetSSID;
 
 void Register_sceNet();
 void Register_sceNetApctl();
+void Register_sceNetApctl_lib();
 void Register_sceWlanDrv();
 void Register_sceNetUpnp();
 void Register_sceNetIfhandle();
+void Register_sceIdStorage_driver();
 
 void __NetInit();
 void __NetShutdown();
@@ -116,7 +119,8 @@ int NetApctl_GetState();
 
 bool __NetApctlConnected();
 
-int sceNetApctlConnect(int connIndex);
+int sceNetApctlConnect(MIPSState *mips, int connIndex);
+int sceNetApctlDisconnect();
 
 // Are we connected - for the purpose of disabling speed consoles and savestates etc.
 bool IsNetworkConnected();

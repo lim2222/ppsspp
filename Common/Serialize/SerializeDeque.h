@@ -27,10 +27,19 @@ void DoDeque(PointerWrap &p, std::deque<T> &x, T &default_val) {
 	Do(p, deq_size);
 	// Guard against an attacker-controlled size driving a huge resize, same as DoVector.
 	if (p.mode == PointerWrap::MODE_READ || p.mode == PointerWrap::MODE_VERIFY) {
-		if (deq_size > p.Remaining() / sizeof(T)) {
+		if (deq_size > p.Remaining() / SerializeMinElemSize<T>()) {
 			p.SetError(PointerWrap::ERROR_FAILURE);
 			return;
 		}
+	}
+	// See DoVector.
+	if (p.mode == PointerWrap::MODE_READ && sizeof(T) > SerializeMinElemSize<T>()) {
+		x.clear();
+		for (u32 i = 0; i < deq_size && !p.Failed(); i++) {
+			x.push_back(default_val);
+			Do(p, x.back());
+		}
+		return;
 	}
 	x.resize(deq_size, default_val);
 	u32 i;
@@ -40,6 +49,13 @@ void DoDeque(PointerWrap &p, std::deque<T> &x, T &default_val) {
 
 template<class T>
 void Do(PointerWrap &p, std::deque<T *> &x) {
+	if (p.mode == PointerWrap::MODE_READ) {
+		// The elements are owned (DoClass replaces them), and a shorter deque would drop the rest.
+		for (T *elem : x) {
+			delete elem;
+		}
+		x.clear();
+	}
 	T *dv = nullptr;
 	DoDeque(p, x, dv);
 }

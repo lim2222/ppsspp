@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <optional>
 
 #include "Common/Data/Convert/ColorConv.h"
 #include "Common/Profiler/Profiler.h"
@@ -30,11 +31,15 @@
 #include "Core/Config.h"
 #include "GPU/GPUCommon.h"
 #include "GPU/Common/DrawEngineCommon.h"
+#include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/GPUStateSIMDUtil.h"
 #include "GPU/Common/SplineCommon.h"
 #include "GPU/Common/DepthRaster.h"
 #include "GPU/Common/ShaderId.h"
 #include "GPU/Common/VertexDecoderCommon.h"
+#include "Common/CPUDetect.h"
+#include "GPU/Common/TransformCommon.h"
+#include "GPU/Common/VertexReader.h"
 #include "GPU/Common/SoftwareTransformCommon.h"
 #include "GPU/ge_constants.h"
 #include "GPU/GPUState.h"
@@ -51,11 +56,13 @@ DrawEngineCommon::DrawEngineCommon() : decoderMap_(32) {
 	transformedExpanded_ = (TransformedVertex *)AllocateMemoryPages(3 * TRANSFORMED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decoded_ = (u8 *)AllocateMemoryPages(DECODED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decIndex_ = (u16 *)AllocateMemoryPages(DECODED_INDEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
+	bboxScratch_ = (u8 *)AllocateMemoryPages(BBOX_SCRATCH_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 
 	_dbg_assert_(transformed_);
 	_dbg_assert_(transformedExpanded_);
 	_dbg_assert_(decoded_);
 	_dbg_assert_(decIndex_);
+	_dbg_assert_(bboxScratch_);
 
 	indexGen.Setup(decIndex_);
 
@@ -65,6 +72,7 @@ DrawEngineCommon::DrawEngineCommon() : decoderMap_(32) {
 DrawEngineCommon::~DrawEngineCommon() {
 	FreeMemoryPages(decoded_, DECODED_VERTEX_BUFFER_SIZE);
 	FreeMemoryPages(decIndex_, DECODED_INDEX_BUFFER_SIZE);
+	FreeMemoryPages(bboxScratch_, BBOX_SCRATCH_SIZE);
 	FreeMemoryPages(transformed_, TRANSFORMED_VERTEX_BUFFER_SIZE);
 	FreeMemoryPages(transformedExpanded_, 3 * TRANSFORMED_VERTEX_BUFFER_SIZE);
 	ShutdownDepthRaster();
@@ -183,15 +191,14 @@ void DrawEngineCommon::DispatchSubmitImm(GEPrimitiveType prim, TransformedVertex
 //   - Less accurate, but..
 //   - Only requires six plane evaluations then.
 bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int vertexCount, const VertexDecoder *dec, u32 vertType) {
-	// Grab temp buffer space from large offsets in decoded_. Not exactly safe for large draws.
-	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
-	// Let's always say objects are within bounds.
+	// The scratch buffer is sized for 1024 vertices. Although this may lead to drawing that shouldn't happen,
+	// the viewport is more complex on VR. Let's always say objects are within bounds.
 	if (vertexCount > 1024 || gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
 		return true;
 	}
 
-	SimpleVertex *corners = (SimpleVertex *)(decoded_ + 65536 * 12);
-	float *verts = (float *)(decoded_ + 65536 * 18);
+	SimpleVertex *corners = (SimpleVertex *)(bboxScratch_ + BBOX_SCRATCH_CORNERS_OFFSET);
+	float *verts = (float *)(bboxScratch_ + BBOX_SCRATCH_VERTS_OFFSET);
 
 	// Try to skip NormalizeVertices if it's pure positions. No need to bother with a vertex decoder
 	// and a large vertex format.
@@ -218,7 +225,7 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 		}
 	} else {
 		// Simplify away indices, bones, and morph before proceeding.
-		u8 *temp_buffer = decoded_ + 65536 * 24;
+		u8 *temp_buffer = bboxScratch_ + BBOX_SCRATCH_TEMP_OFFSET;
 
 		if ((inds || (vertType & (GE_VTYPE_WEIGHT_MASK | GE_VTYPE_MORPHCOUNT_MASK)))) {
 			// Need for Speed Carbon ends up on this path! With a single bone weight.
@@ -355,98 +362,161 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 // off to hardware, with whatever capabilities are available.
 //
 // NOTE: This doesn't handle through-mode or indexing (morph or skinning can be handled if they're implemented in software during decode).
-template<u32 posFmt, u32 idxFmt>
-static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, ClipInfoFlags *clipInfoFlags) {
-	Mat4F32 cullMat(cullMatrix);
-	alignas(16) static const float planesXYData[4] = { 1, -1, 1, -1 };
-	Vec4F32 planesXY = Vec4F32::LoadAligned(planesXYData);
-	Vec4S32 insideMaskXY = Vec4S32::Zero();
-	Vec4S32 insideMaskZ = Vec4S32::Zero();  // Note: This does some duplicate computation. We could avoid it on ARM32 using Vec2S32 but not really worth it.
-	Vec4S32 anyOutsideMaskZ = Vec4S32::Zero();
+template<u32 idxFmt>
+static inline const s8 *BoundingBoxVertex(const s8 *srcdata, const void *idata, int stride, int i) {
+	switch (idxFmt) {
+	case GE_VTYPE_IDX_8BIT: return srcdata + ((const u8 *)idata)[i] * stride;
+	case GE_VTYPE_IDX_16BIT: return srcdata + ((const u16 *)idata)[i] * stride;
+	// The PSP ignores the upper 16 bits.
+	case GE_VTYPE_IDX_32BIT: return srcdata + (u16)((const u32 *)idata)[i] * stride;
+	default: return srcdata + i * stride;
+	}
+}
 
-	// Used to reduce the Z precision. This effectively implements the small offsets where Z can be very slightly outside -1..1.
-	// In reality we should probably affect X and Y too, but meh.
-	alignas(16) static const u32 vertexMaskData[4] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFF00, 0xFFFFFFFF};
+template<u32 posFmt>
+static inline Vec4F32 BoundingBoxPos(const s8 *data) {
+	switch (posFmt) {
+	case GE_VTYPE_POS_8BIT: return Vec4F32::LoadS8Norm(data);
+	case GE_VTYPE_POS_16BIT: return Vec4F32::LoadS16Norm((const s16 *)data);
+	default: return Vec4F32::Load((const float *)data);
+	}
+}
+
+// a / b, rounded correctly (ARM32 NEON can only approximate it).
+static inline Vec4F32 DivideExact(Vec4F32 a, Vec4F32 b) {
+#if PPSSPP_ARCH(ARM_NEON) && !PPSSPP_ARCH(ARM64_NEON)
+	// The VFP registers overlap the NEON ones, so these divide in place.
+	float32x4_t r = a.v;
+	r = vsetq_lane_f32(vgetq_lane_f32(a.v, 0) / vgetq_lane_f32(b.v, 0), r, 0);
+	r = vsetq_lane_f32(vgetq_lane_f32(a.v, 1) / vgetq_lane_f32(b.v, 1), r, 1);
+	r = vsetq_lane_f32(vgetq_lane_f32(a.v, 2) / vgetq_lane_f32(b.v, 2), r, 2);
+	r = vsetq_lane_f32(vgetq_lane_f32(a.v, 3) / vgetq_lane_f32(b.v, 3), r, 3);
+	return Vec4F32{ r };
+#else
+	a /= b;
+	return a;
+#endif
+}
+
+// Whether ClipCullPrims can clip every triangle of a draw with this state, not needing the clip distance.
+static bool CpuCanClipAll() {
+	const GETexMapMode uvGen = gstate.getUVGenMode();
+	const bool normalTexGen = uvGen == GE_TEXMAP_ENVIRONMENT_MAP || (uvGen == GE_TEXMAP_TEXTURE_MATRIX && gstate.getUVProjMode() == GE_PROJMAP_NORMALIZED_NORMAL);
+	return gstate.getShadeMode() != GE_SHADE_FLAT && !(gstate.isTextureMapEnabled() && normalTexGen);
+}
+
+// This optionally culls collections of points against the six planes, and always computes the min and max of Z and W.
+//
+// The result of that is then used to determine if we need to drop down to software transform+clip or we can hand
+// off to hardware, with whatever capabilities are available.
+//
+// NOTE: This doesn't handle through-mode (morph or skinning can be handled if they're implemented in software during decode).
+// Whether screen Z from minProjZ to maxProjZ reaches past a depth range that isn't the full one.
+static bool ReachesPastDepthRange(float minProjZ, float maxProjZ) {
+	const int depthRangeMin = gstate.getDepthRangeMin();
+	const int depthRangeMax = gstate.getDepthRangeMax();
+	return (depthRangeMin != 0 && minProjZ < depthRangeMin) || (depthRangeMax != 0xFFFF && maxProjZ > depthRangeMax);
+}
+
+template<u32 posFmt, u32 idxFmt>
+static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, bool cpuCullSupported, ClipInfoFlags *clipInfoFlags) {
+	// Four vertices at a time, one per lane. Past the end, the last vertex fills the lanes, which changes nothing.
+	// The matrix stays in four registers, multiplied by lane. Splatted, it took sixteen, and was reloaded from the
+	// stack every iteration.
+	const Vec4F32 col0 = Vec4F32::Load(cullMatrix);
+	const Vec4F32 col1 = Vec4F32::Load(cullMatrix + 4);
+	const Vec4F32 col2 = Vec4F32::Load(cullMatrix + 8);
+	const Vec4F32 tx = Vec4F32::Splat(cullMatrix[12]);
+	const Vec4F32 ty = Vec4F32::Splat(cullMatrix[13]);
+	const Vec4F32 tz = Vec4F32::Splat(cullMatrix[14]);
+	const Vec4F32 tw = Vec4F32::Splat(cullMatrix[15]);
+
+	// For each side of the clipping cube, whether any vertex is inside it, and whether any is outside the Z sides.
+	Vec4S32 insideLeft = Vec4S32::Zero();
+	Vec4S32 insideRight = Vec4S32::Zero();
+	Vec4S32 insideTop = Vec4S32::Zero();
+	Vec4S32 insideBottom = Vec4S32::Zero();
+	Vec4S32 insideNear = Vec4S32::Zero();
+	Vec4S32 insideFar = Vec4S32::Zero();
+	Vec4S32 anyOutsideZ = Vec4S32::Zero();
+	Vec4S32 anyBehindNear = Vec4S32::Zero();
+
 	const int stride = dec->VertexSize();
 	const s8 *srcdata = (const s8 *)vdata + dec->posoff;
-	const s8 *data = srcdata;
+	const int last = vertexCount - 1;
 
-	const float vpZScale = gstate.getViewportZScale();
+	const Vec4F32 vpZScale = Vec4F32::Splat(gstate.getViewportZScale());
+	const Vec4F32 zero = Vec4F32::Zero();
+	Vec4F32 minZ = Vec4F32::Splat(FLT_MAX);
+	Vec4F32 maxZ = Vec4F32::Splat(-FLT_MAX);
+	// With depth clipping, what's behind the near plane is clipped away before it's drawn, so its screen Z (which
+	// behind the eye is meaningless) doesn't count, and the near plane's does instead, below. Counting it made every
+	// draw crossing the near plane take the fragment shader depth clamp, whose depth doesn't match the other draws'
+	// (Monster Hunter 3rd HD's ground on PowerVR GLES).
+	const bool depthClip = gstate.isDepthClipEnabled();
+
+	for (int i = 0; i < vertexCount; i += 4) {
+		Vec4F32 objX = BoundingBoxPos<posFmt>(BoundingBoxVertex<idxFmt>(srcdata, idata, stride, i));
+		Vec4F32 objY = BoundingBoxPos<posFmt>(BoundingBoxVertex<idxFmt>(srcdata, idata, stride, std::min(i + 1, last)));
+		Vec4F32 objZ = BoundingBoxPos<posFmt>(BoundingBoxVertex<idxFmt>(srcdata, idata, stride, std::min(i + 2, last)));
+		Vec4F32 unused = BoundingBoxPos<posFmt>(BoundingBoxVertex<idxFmt>(srcdata, idata, stride, std::min(i + 3, last)));
+		Vec4F32::Transpose(objX, objY, objZ, unused);
+
+		// The same operations in the same order as AsVec3ByMatrix44(), so the same rounding.
+		const Vec4F32 x = (objX.MulLane<0>(col0) + objY.MulLane<0>(col1)) + (objZ.MulLane<0>(col2) + tx);
+		const Vec4F32 y = (objX.MulLane<1>(col0) + objY.MulLane<1>(col1)) + (objZ.MulLane<1>(col2) + ty);
+		const Vec4F32 z = (objX.MulLane<2>(col0) + objY.MulLane<2>(col1)) + (objZ.MulLane<2>(col2) + tz);
+		const Vec4F32 w = (objX.MulLane<3>(col0) + objY.MulLane<3>(col1)) + (objZ.MulLane<3>(col2) + tw);
+
+		insideLeft |= (x + w).CompareGe(zero);
+		insideRight |= (w - x).CompareGe(zero);
+		insideTop |= (y + w).CompareGe(zero);
+		insideBottom |= (w - y).CompareGe(zero);
+		// We need to add the same culling epsilons as when setting up the cull distances in the vertex shader,
+		// so we don't over-cull here. We could also cull looser, but I can't figure out how to do so accurately.
+		const Vec4F32 deltaZ = w.RecipApprox() * 0.0000304f;
+		const Vec4F32 nearDist = (z + w) + deltaZ;
+		const Vec4F32 farDist = (w - z) + deltaZ;
+		insideNear |= nearDist.CompareGe(zero);
+		insideFar |= farDist.CompareGe(zero);
+		anyOutsideZ |= nearDist.CompareLt(zero) | farDist.CompareLt(zero);
+		const Vec4S32 behindNear = (z + w).CompareLt(zero);
+		anyBehindNear |= behindNear;
+
+		// NaN compares false, so it's never picked.
+		const Vec4F32 projZ = DivideExact(vpZScale * z, w);
+		const Vec4S32 notCounted = depthClip ? behindNear : Vec4S32::Zero();
+		minZ = Select(projZ.CompareLt(minZ).AndNot(notCounted), projZ, minZ);
+		maxZ = Select(projZ.CompareGt(maxZ).AndNot(notCounted), projZ, maxZ);
+	}
+
+	if (!AnyCompareBitsSet(insideLeft) || !AnyCompareBitsSet(insideRight) || !AnyCompareBitsSet(insideTop) ||
+		!AnyCompareBitsSet(insideBottom) || !AnyCompareBitsSet(insideNear) || !AnyCompareBitsSet(insideFar)) {
+		// All vertices were outside one side of the clipping cube. We can skip the draw entirely.
+		return false;
+	}
 
 	float minProjZ = FLT_MAX;
 	float maxProjZ = -FLT_MAX;
-
-	for (int i = 0; i < vertexCount; i++) {
-		switch (idxFmt) {
-		case GE_VTYPE_IDX_8BIT:
-		{
-			u8 idx = ((u8 *)idata)[i];
-			data = (const s8 *)srcdata + idx * stride;
-			break;
-		}
-		case GE_VTYPE_IDX_16BIT:
-		{
-			u16 idx = ((u16 *)idata)[i];
-			data = (const s8 *)srcdata + idx * stride;
-			break;
-		}
-		case GE_VTYPE_IDX_32BIT:
-		{
-			u32 idx = ((u32 *)idata)[i];
-			data = (const s8 *)srcdata + idx * stride;
-			break;
-		}
-		default:
-			// We just increment data at the end of the loop.
-			break;
-		}
-
-		Vec4F32 objPos;
-		switch (posFmt) {
-		case GE_VTYPE_POS_8BIT:
-			objPos = Vec4F32::LoadS8Norm(data);
-			break;
-		case GE_VTYPE_POS_16BIT:
-			objPos = Vec4F32::LoadS16Norm((const s16 *)data);
-			break;
-		default:
-			objPos = Vec4F32::Load((const float *)data);
-			break;
-		}
-		Vec4F32 clipPos = objPos.AsVec3ByMatrix44(cullMat);
-		Vec4F32 posW = clipPos.ShuffleWWWW();
-		Vec4F32 posXY = clipPos.ShuffleXXYY();
-		Vec4F32 planeDistXY = posXY * planesXY + posW;
-		insideMaskXY |= planeDistXY.CompareGe(Vec4F32::Zero());
-		Vec4F32 posZ = clipPos.ShuffleZZZZ();  // This means that we compute the Z sides twice. Oh well.
-		// We need to add the same culling epsilons as when setting up the cull distances in the vertex shader,
-		// so we don't over-cull here. We could also cull looser, but I can't figure out how to do so accurately.
-		// It's a bit unnecessary to take four reciprocals here, let's see if we can avoid that later.
-		Vec4F32 deltaZ = posW.RecipApprox() * 0.0000304f;
-		Vec4F32 planeDistZ = posZ * planesXY + posW + deltaZ;
-		anyOutsideMaskZ |= planeDistZ.CompareLt(Vec4F32::Zero());
-		insideMaskZ |= planeDistZ.CompareGe(Vec4F32::Zero());
-		const float projZ = vpZScale * clipPos[2] / clipPos[3];
-		if (projZ < minProjZ) {
-			minProjZ = projZ;
-		}
-		if (projZ > maxProjZ) {  // else ruins the minss/maxss optimization.
-			maxProjZ = projZ;
-		}
-
-		if (idxFmt == GE_VTYPE_IDX_NONE) {
-			data += stride;
-		}
-	}
-
-	if (!AllCompareBitsSet(insideMaskXY) || !AllCompareBitsSet(insideMaskZ)) {
-		// All vertices were outside one side of the clipping cube. We can skip the draw entirely.
-		return false;
+	for (int i = 0; i < 4; i++) {
+		if (minZ[i] < minProjZ)
+			minProjZ = minZ[i];
+		if (maxZ[i] > maxProjZ)
+			maxProjZ = maxZ[i];
 	}
 
 	const float vpZOffset = gstate.getViewportZCenter();
 	minProjZ += vpZOffset;
 	maxProjZ += vpZOffset;
+	// Of the vertices themselves, without what clipping makes.
+	const float minVertexZ = minProjZ, maxVertexZ = maxProjZ;
+	const bool clipsNear = depthClip && AnyCompareBitsSet(anyBehindNear);
+	// Where clipping puts the vertices it makes (z = -w).
+	const float nearZ = vpZOffset - gstate.getViewportZScale();
+	if (clipsNear) {
+		minProjZ = std::min(minProjZ, nearZ);
+		maxProjZ = std::max(maxProjZ, nearZ);
+	}
 
 	ClipInfoFlags flags = ClipInfoFlags::Valid;
 
@@ -458,7 +528,7 @@ static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, cons
 	//
 	// Alternatively, we just do a compat flag for the affected games until we can solve this.
 
-	if (needFragmentMinMaxClipping() && (minProjZ < gstate.getDepthRangeMin() || maxProjZ > gstate.getDepthRangeMax())) {
+	if (ReachesPastDepthRange(minProjZ, maxProjZ)) {
 		if (gstate_c.Use(GPU_USE_CLIP_DISTANCE)) {
 			flags |= ClipInfoFlags::MinMaxZClip;
 		} else {
@@ -467,10 +537,29 @@ static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, cons
 		}
 	}
 
-	if (AnyCompareBitsSet(anyOutsideMaskZ) && (!gstate_c.viewportNearPlaneMatchesOutput || PSP_CoreParameter().compat.flags().CorrectCullAfterClip)) {
+	// With both of the viewport's Z planes on the min/max clip planes, those clip exactly like the GE, and also take
+	// away what's entirely beyond the far plane, which otherwise only cull distances can (Naruto Shippuden: Ultimate
+	// Ninja Impact's grass, whose depth then matches the ground's).
+	const bool clipPlanesDoIt = gstate_c.viewportZPlanesOnClipPlanes && gstate.isDepthClipEnabled();
+	const bool hardwareClipsZ = gstate_c.Use(GPU_USE_CLIP_DISTANCE) && (clipPlanesDoIt || (gstate_c.Use(GPU_USE_CULL_DISTANCE) && gstate_c.viewportNearPlaneMatchesOutput));
+	// The GPU clips and culls like the GE then, except for range culling the parts clipping makes, which the games
+	// flagged CorrectCullAfterClip need.
+	const bool correctCullAfterClip = PSP_CoreParameter().compat.flags().CorrectCullAfterClip;
+	const bool gpuDoesZ = hardwareClipsZ && !correctCullAfterClip;
+	// Otherwise the CPU clips at the near plane and culls like the GE, including the range culling after clipping, and
+	// the vertices stay on hardware transform, the same math as the other passes over the surface: mixing in software
+	// transform made those depth tests fail on PowerVR. What it can't clip is left to the clip distance.
+	const bool cpuCulls = cpuCullSupported && !gpuDoesZ && (!clipPlanesDoIt || correctCullAfterClip) && gstate.isDepthClipEnabled() && (gstate_c.Use(GPU_USE_CLIP_DISTANCE) || CpuCanClipAll());
+	if (cpuCulls) {
+		if (AnyCompareBitsSet(anyOutsideZ)) {
+			flags |= ClipInfoFlags::CpuCull;
+		}
+	} else if (AnyCompareBitsSet(anyOutsideZ) && !gpuDoesZ) {
 		// Some vertices were outside the Z clipping planes. Clip againt Z=-W in software (and do culling, too).
-		// TODO: With a compat flag for Flatout/Sengoku, we'll be able to avoid this in many cases, unless
-		// GPU_USE_CULL_DISTANCE is missing, in which case we need it for culling.
+		// Without cull distances the shader can't cull, and triangles entirely beyond the far plane would be
+		// depth clamped and drawn (the stands over the pitch in FIFA Soccer). Without clip distances it can't
+		// clip against the near plane (Test Drive's hills over the sky, on old Mali).
+		// TODO: With a compat flag for Flatout/Sengoku, we'll be able to avoid this in many cases.
 		flags |= ClipInfoFlags::SoftClipCull;
 	}
 
@@ -479,10 +568,15 @@ static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, cons
 		flags |= ClipInfoFlags::FlatZ | ClipInfoFlags::SoftClipCull;
 	}
 
-	if (needFragmentDepthClamp() && (minProjZ < 0 || maxProjZ > 65535)) {
+	if (needFragmentDepthClamp()) {
 		if (gstate_c.Use(GPU_USE_DEPTH_CLAMP)) {
-			flags |= ClipInfoFlags::DepthClamp;
-		} else {
+			if (minProjZ < 0 || maxProjZ > 65535) {
+				flags |= ClipInfoFlags::DepthClamp;
+			}
+		} else if (minVertexZ <= 0 || maxVertexZ >= 65535 || (clipsNear && (nearZ < 0 || nearZ > 65535))) {
+			// Including vertices right on the limit (Puyo Puyo Fever 2's flat Z = 0 ground): hardware clamp keeps
+			// what rounding puts just outside, the clip without it doesn't. On the near plane, losing that is the
+			// near clip.
 			flags |= ClipInfoFlags::DepthClampFragment;
 		}
 	}
@@ -491,7 +585,105 @@ static bool TestBoundingBoxFast(const float *cullMatrix, const void *vdata, cons
 	return true;
 }
 
-bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *flags) {
+// Never CpuCull or SoftClipCull: without the bounding box test, nothing says the draw crosses a Z plane.
+ClipInfoFlags DrawEngineCommon::UncheckedClipInfoFlags() {
+	ClipInfoFlags flags{};
+	if (gstate.isModeThrough() || gstate.isModeClear()) {
+		return flags;
+	}
+	// Hardware depth clamp and clip planes are always on for these, so do the same with the fallbacks.
+	if (needFragmentDepthClamp() && !gstate_c.Use(GPU_USE_DEPTH_CLAMP)) {
+		flags |= ClipInfoFlags::Valid | ClipInfoFlags::DepthClampFragment;
+	}
+	if (needFragmentMinMaxClipping() && !gstate_c.Use(GPU_USE_CLIP_DISTANCE)) {
+		// The discard costs fill rate (a quarter of the frame in Tekken 6 at 4x on Mali), and skinned draws are
+		// rarely past the range, so they're checked once decoded. Morphed ones are rare, and keep it.
+		const bool skinned = (gstate.vertType & GE_VTYPE_WEIGHT_MASK) != 0;
+		flags |= ClipInfoFlags::Valid | (skinned ? ClipInfoFlags::MinMaxZCheck : ClipInfoFlags::MinMaxZDiscard);
+	}
+	return flags;
+}
+
+void DrawEngineCommon::CheckSkinnedMinMaxZ(bool useHWTransform) {
+	if (!(clipInfoFlags_ & ClipInfoFlags::Valid) || !(clipInfoFlags_ & ClipInfoFlags::MinMaxZCheck)) {
+		return;
+	}
+	clipInfoFlags_ &= ~ClipInfoFlags::MinMaxZCheck;
+	if (!useHWTransform) {
+		clipInfoFlags_ |= ClipInfoFlags::MinMaxZDiscard;
+		return;
+	}
+
+	// Into decoded_, where the backends put skinned vertices anyway. Then the screen Z of each, as in
+	// TestBoundingBoxFast: four at a time, and only z and w.
+	DecodeVerts(dec_, decoded_);
+	const int count = numDecodedVerts_;
+	if (count == 0) {
+		return;
+	}
+	const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
+	const float *m = gstate_c.cullMatrix;
+	const Vec4F32 col0 = Vec4F32::Load(m);
+	const Vec4F32 col1 = Vec4F32::Load(m + 4);
+	const Vec4F32 col2 = Vec4F32::Load(m + 8);
+	const Vec4F32 tz = Vec4F32::Splat(m[14]);
+	const Vec4F32 tw = Vec4F32::Splat(m[15]);
+	const Vec4F32 vpZScale = Vec4F32::Splat(gstate.getViewportZScale());
+	const Vec4F32 zero = Vec4F32::Zero();
+	const bool depthClip = gstate.isDepthClipEnabled();
+	Vec4F32 minZ = Vec4F32::Splat(FLT_MAX);
+	Vec4F32 maxZ = Vec4F32::Splat(-FLT_MAX);
+	Vec4S32 anyBehindNear = Vec4S32::Zero();
+	// The positions are last in the decoded vertex, so each load reads 4 bytes into the next one, or past the last,
+	// which is still in decoded_.
+	const s8 *posData = (const s8 *)decoded_ + fmt.posoff;
+	const int stride = fmt.stride;
+	auto test4 = [&](const s8 *p0, const s8 *p1, const s8 *p2, const s8 *p3) {
+		Vec4F32 objX = Vec4F32::Load((const float *)p0);
+		Vec4F32 objY = Vec4F32::Load((const float *)p1);
+		Vec4F32 objZ = Vec4F32::Load((const float *)p2);
+		Vec4F32 unused = Vec4F32::Load((const float *)p3);
+		Vec4F32::Transpose(objX, objY, objZ, unused);
+		const Vec4F32 z = (objX.MulLane<2>(col0) + objY.MulLane<2>(col1)) + (objZ.MulLane<2>(col2) + tz);
+		const Vec4F32 w = (objX.MulLane<3>(col0) + objY.MulLane<3>(col1)) + (objZ.MulLane<3>(col2) + tw);
+		const Vec4S32 behindNear = (z + w).CompareLt(zero);
+		anyBehindNear |= behindNear;
+		const Vec4F32 projZ = DivideExact(vpZScale * z, w);
+		// With depth clipping, what's behind the near plane is clipped away, and the near plane counts instead.
+		const Vec4S32 notCounted = depthClip ? behindNear : Vec4S32::Zero();
+		minZ = Select(projZ.CompareLt(minZ).AndNot(notCounted), projZ, minZ);
+		maxZ = Select(projZ.CompareGt(maxZ).AndNot(notCounted), projZ, maxZ);
+	};
+	int i = 0;
+	const s8 *p = posData;
+	for (; i + 4 <= count; i += 4, p += 4 * stride) {
+		test4(p, p + stride, p + 2 * stride, p + 3 * stride);
+	}
+	if (i < count) {
+		// The last vertex fills the remaining lanes, which changes nothing.
+		const int last = count - 1;
+		test4(p, posData + std::min(i + 1, last) * stride, posData + std::min(i + 2, last) * stride, posData + last * stride);
+	}
+	float minProjZ = FLT_MAX;
+	float maxProjZ = -FLT_MAX;
+	for (int i = 0; i < 4; i++) {
+		minProjZ = std::min(minProjZ, minZ[i]);
+		maxProjZ = std::max(maxProjZ, maxZ[i]);
+	}
+	const float vpZOffset = gstate.getViewportZCenter();
+	minProjZ += vpZOffset;
+	maxProjZ += vpZOffset;
+	if (depthClip && AnyCompareBitsSet(anyBehindNear)) {
+		const float nearZ = vpZOffset - gstate.getViewportZScale();
+		minProjZ = std::min(minProjZ, nearZ);
+		maxProjZ = std::max(maxProjZ, nearZ);
+	}
+	if (ReachesPastDepthRange(minProjZ, maxProjZ)) {
+		clipInfoFlags_ |= ClipInfoFlags::MinMaxZDiscard;
+	}
+}
+
+bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *vdata, const void *idata, int vertexCount, const VertexDecoder *dec, u32 vertType, ClipInfoFlags *flags, bool cpuCullSupported) {
 	// Although this may lead to drawing that shouldn't happen, the viewport is more complex on VR.
 	// Let's always say objects are within bounds.
 	if (gstate_c.Use(GPU_USE_VIRTUAL_REALITY)) {
@@ -505,36 +697,36 @@ bool DrawEngineCommon::TestBoundingBoxFast(const float *cullMatrix, const void *
 	switch (vertType & GE_VTYPE_IDX_MASK) {
 	case GE_VTYPE_IDX_NONE:
 		switch (vertType & GE_VTYPE_POS_MASK) {
-		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, flags);
-		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, flags);
-		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, flags);
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_NONE>(cullMatrix, vdata, nullptr, vertexCount, dec, cpuCullSupported, flags);
 		default:
 			break;
 		}
 		break;
 	case GE_VTYPE_IDX_8BIT:
 		switch (vertType & GE_VTYPE_POS_MASK) {
-		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
-		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
-		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_8BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
 		default:
 			break;
 		}
 		break;
 	case GE_VTYPE_IDX_16BIT:
 		switch (vertType & GE_VTYPE_POS_MASK) {
-		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
-		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
-		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_16BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
 		default:
 			break;
 		}
 		break;
 	case GE_VTYPE_IDX_32BIT:
 		switch (vertType & GE_VTYPE_POS_MASK) {
-		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
-		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
-		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, flags);
+		case GE_VTYPE_POS_8BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_8BIT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_16BIT: return ::TestBoundingBoxFast<GE_VTYPE_POS_16BIT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
+		case GE_VTYPE_POS_FLOAT: return ::TestBoundingBoxFast<GE_VTYPE_POS_FLOAT, GE_VTYPE_IDX_32BIT>(cullMatrix, vdata, idata, vertexCount, dec, cpuCullSupported, flags);
 		default:
 			break;
 		}
@@ -719,6 +911,13 @@ void DrawEngineCommon::ApplyFramebufferRead(FBOTexState *fboTexState) {
 	gstate_c.Dirty(DIRTY_SHADERBLEND);
 }
 
+int DrawEngineCommon::ShaderReadBindFlags() const {
+	// The mask forces blending and the logic op into the shader too, so check what the GE asks for.
+	const bool maskOnly = pipelineState_.maskState.applyFramebufferRead && !gstate.isAlphaBlendEnabled() &&
+		!(gstate.isLogicOpEnabled() && gstate.getLogicOp() != GE_LOGIC_COPY);
+	return BINDFBCOLOR_MAY_COPY | (maskOnly ? BINDFBCOLOR_MASK_READ : 0) | BINDFBCOLOR_UNCACHED;
+}
+
 int DrawEngineCommon::ComputeNumVertsToDecode() const {
 	int sum = 0;
 	for (int i = 0; i < numDrawVerts_; i++) {
@@ -727,12 +926,358 @@ int DrawEngineCommon::ComputeNumVertsToDecode() const {
 	return sum;
 }
 
+// DrawEngineCommon::vertClass_ bits.
+enum : u8 {
+	VERT_BEHIND_NEAR = 1,
+	VERT_BEYOND_FAR = 2,
+};
+
+// Where the edge from the inside vertex a crosses the near plane to the outside vertex b, like the software
+// transform's clipper computes it.
+static float NearPlaneT(const float *a, const float *b) {
+	const float denominator = (b[2] - a[2]) + (b[3] - a[3]);
+	const float t = fabsf(denominator) > 0.000001f ? (-a[2] - a[3]) / denominator : 0.0f;
+	return std::clamp(t, 0.0f, 1.0f);
+}
+
+static bool NearPointOutsideRange(const float *a, const float *b, float t) {
+	const float x = a[0] + (b[0] - a[0]) * t;
+	const float y = a[1] + (b[1] - a[1]) * t;
+	const float w = a[3] + (b[3] - a[3]) * t;
+	const float sx = x * gstate.getViewportXScale() / w + gstate.getViewportXCenter();
+	const float sy = y * gstate.getViewportYScale() / w + gstate.getViewportYCenter();
+	return !(sx >= 0.0f && sy >= 0.0f && sx < 4096.0f && sy < 4096.0f);
+}
+
+static void LerpComponent(u8 fmt, u8 *dst, const u8 *a, const u8 *b, float t) {
+	int count = 0;
+	switch (fmt) {
+	case DEC_FLOAT_1: case DEC_FLOAT_2: case DEC_FLOAT_3: case DEC_FLOAT_4:
+		count = fmt - DEC_FLOAT_1 + 1;
+		for (int i = 0; i < count; i++) {
+			const float fa = ((const float *)a)[i], fb = ((const float *)b)[i];
+			((float *)dst)[i] = fa + (fb - fa) * t;
+		}
+		break;
+	case DEC_S8_3:
+		for (int i = 0; i < 3; i++) {
+			const float fa = (s8)a[i], fb = (s8)b[i];
+			dst[i] = (u8)(s8)roundf(fa + (fb - fa) * t);
+		}
+		break;
+	case DEC_S16_3:
+		for (int i = 0; i < 3; i++) {
+			const float fa = ((const s16 *)a)[i], fb = ((const s16 *)b)[i];
+			((s16 *)dst)[i] = (s16)roundf(fa + (fb - fa) * t);
+		}
+		break;
+	case DEC_U8_1: case DEC_U8_2: case DEC_U8_3: case DEC_U8_4:
+		count = fmt - DEC_U8_1 + 1;
+		for (int i = 0; i < count; i++) {
+			dst[i] = (u8)roundf(a[i] + (b[i] - a[i]) * t);
+		}
+		break;
+	case DEC_U16_1: case DEC_U16_2: case DEC_U16_3: case DEC_U16_4:
+		count = fmt - DEC_U16_1 + 1;
+		for (int i = 0; i < count; i++) {
+			const float fa = ((const u16 *)a)[i], fb = ((const u16 *)b)[i];
+			((u16 *)dst)[i] = (u16)roundf(fa + (fb - fa) * t);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+DrawEngineCommon::CpuClip DrawEngineCommon::BeginCpuClip(bool useHWTransform) {
+	CpuClip clip;
+	clip.fmt = dec_->GetDecVtxFmt();
+	clip.active = useHWTransform && (clipInfoFlags_ & ClipInfoFlags::Valid) && (clipInfoFlags_ & ClipInfoFlags::CpuCull);
+	// With lighting, the CPU lights the ends of the edges it clips, so the vertices clipping makes get interpolated lit
+	// colors like on the GE. All lit draws have the stream for them then, so whether one is clipped doesn't change its
+	// pipeline.
+	clip.cpuLit = useHWTransform && CpuLightsClipped();
+	if (clip.cpuLit) {
+		clip.fmt.cpuLit = 1;
+		clip.fmt.ComputeID();
+	}
+	if (clip.cpuLit != lastCpuLit_) {
+		// Different vertex shader and vertex layout.
+		gstate_c.Dirty(DIRTY_VERTEXSHADER_STATE);
+		lastCpuLit_ = clip.cpuLit;
+	}
+	return clip;
+}
+
+void DrawEngineCommon::DecodeClipCull(CpuClip *clip, GEPrimitiveType *prim, int *vertexCount, int *maxIndex, bool *useElements) {
+	// In decoded_, not the push buffer, which is too slow to read back.
+	DecodeVerts(dec_, decoded_);
+	DecodeIndsAndGetData(prim, vertexCount, maxIndex, useElements, true);
+	clip->numVerts = numDecodedVerts_;
+	const int origVerts = clip->numVerts;
+	*vertexCount = ClipCullPrims(*prim, decoded_, clip->fmt, &clip->numVerts, decIndex_, *vertexCount);
+	*maxIndex = clip->numVerts;
+	if (clip->cpuLit && clip->numVerts > origVerts) {
+		clip->cpuLitStream = cpuLitStream_.data();
+	}
+}
+
+void DrawEngineCommon::DepthRasterSubmitHW(GEPrimitiveType prim, int vertexCount, const CpuClip &clip) {
+	if (clip.active) {
+		DepthRasterPredecoded(prim, decoded_, clip.numVerts, dec_, vertexCount, &clip.fmt);
+	} else {
+		DepthRasterSubmitRaw(prim, dec_, dec_->VertexType(), vertexCount);
+	}
+}
+
+bool DrawEngineCommon::CpuLightsClipped() const {
+	// With the clip distance, the GPU clips lit draws after lighting like the GE, but can't range cull what clipping
+	// makes.
+	return cpuLitStreamSupported_ && gstate.isLightingEnabled() && gstate.getShadeMode() != GE_SHADE_FLAT &&
+		(!gstate_c.Use(GPU_USE_CLIP_DISTANCE) || PSP_CoreParameter().compat.flags().CorrectCullAfterClip);
+}
+
+int DrawEngineCommon::ClipCullPrims(GEPrimitiveType prim, u8 *verts, const DecVtxFormat &fmt, int *numVerts, u16 *inds, int indexCount) {
+	// The indices are forced (DecodeIndsAndGetData), which makes strips and fans lists.
+	int perPrim;
+	switch (prim) {
+	case GE_PRIM_TRIANGLES: perPrim = 3; break;
+	case GE_PRIM_LINES: perPrim = 2; break;
+	case GE_PRIM_POINTS: perPrim = 1; break;
+	default: return indexCount;
+	}
+
+	const float *m = gstate_c.worldviewproj;
+	const int stride = fmt.stride;
+	const int origVerts = *numVerts;
+	// Grown, never shrunk, so they aren't cleared every time.
+	if (clipPos_.size() < origVerts * 4) {
+		clipPos_.resize(origVerts * 4);
+		vertClass_.resize(origVerts);
+	}
+	const Mat4F32 mat(m);
+	for (int i = 0; i < origVerts; i++) {
+		// The decoded position is the last member, so the fourth lane reads into the next vertex, or the rest of
+		// decoded_, and AsVec3ByMatrix44 ignores it.
+		const float *pos = (const float *)(verts + i * stride + fmt.posoff);
+		float *c = &clipPos_[i * 4];
+		Vec4F32::Load(pos).AsVec3ByMatrix44(mat).Store(c);
+		// The same as the far cull distance in the vertex shader. With w > 0 and w - z >= 0 it can't be negative, so
+		// the division (in front of the far plane, mostly) is skipped there.
+		const float farDist = c[3] - c[2];
+		const bool beyondFar = (farDist < 0.0f || c[3] <= 0.0f) && farDist + 0.0000304f / c[3] < 0.0f;
+		const bool behindNear = c[2] < -c[3];
+		vertClass_[i] = (behindNear ? VERT_BEHIND_NEAR : 0) | (beyondFar ? VERT_BEYOND_FAR : 0);
+	}
+
+	if (perPrim != 3) {
+		int out = 0;
+		for (int i = 0; i + perPrim <= indexCount; i += perPrim) {
+			bool culled = true;
+			for (int j = 0; j < perPrim; j++) {
+				culled = culled && (vertClass_[inds[i + j]] & VERT_BEYOND_FAR);
+			}
+			if (culled) {
+				continue;
+			}
+			for (int j = 0; j < perPrim; j++) {
+				inds[out++] = inds[i + j];
+			}
+		}
+		return out;
+	}
+
+	// Triangles crossing the near plane get clipped here like the GE does it (ProcessTriangle in Clipper.cpp, from
+	// gpu/probe exp43, exp44), into one triangle, or two, (p, a, b) and (p, b, n), with o behind the plane. Each is
+	// then range culled on the vertices clipping made. The shader can't do that: it exempts the vertices behind the
+	// near plane. The new vertices are interpolated from the decoded ones, so the GPU transforms them like the rest.
+	// That's only right where the vertex outputs are linear in them: the GE interpolates the lit colors, so with
+	// lighting, the ends of the clipped edges are lit here (fmt.cpuLit), and the new vertices take those colors.
+	// Normal-based texgen and flat shading (whose provoking colors would have to move) are left to the GPU's clip
+	// distance, culling only what is culled whole.
+	const bool rangeCulling = gstate_c.Use(GPU_USE_VS_RANGE_CULLING) && gstate_c.submitType == SubmitType::DRAW;
+	const bool canClip = CpuCanClipAll() && (!gstate.isLightingEnabled() || fmt.cpuLit);
+	const bool reversed = BatchTrianglesReversed();
+	const int maxVerts = std::min((int)VERTEX_BUFFER_MAX, (int)DECODED_VERTEX_BUFFER_SIZE / stride);
+	const int maxInds = DECODED_INDEX_BUFFER_SIZE / sizeof(u16);
+	int vertCount = origVerts;
+
+	// Lights a vertex on the CPU, once, like the software transform. Its colors stay unused (cpulit1.a = 0), as the
+	// shader lights it too: only the vertices made from it take them.
+	std::optional<Lighter> lighter;
+	const u32 vertType = dec_->VertexType();
+	const bool lmode = gstate.isUsingSecondaryColor();
+	const Vec4f materialAmbientRGBA = Vec4f::FromRGBA(gstate.getMaterialAmbientRGBA());
+	VertexReader reader(verts, fmt, vertType);
+	if (fmt.cpuLit) {
+		lighter.emplace(vertType);
+		cpuLitDone_.assign(origVerts, 0);
+		if (cpuLitColors_.size() < origVerts * 2) {
+			cpuLitColors_.resize(origVerts * 2);
+		}
+		// Filled when clipping makes a vertex. Until then, the draw uses a stream of zeroes.
+		cpuLitStream_.clear();
+	}
+	auto lightVertex = [&](int v) {
+		if (cpuLitDone_[v]) {
+			return;
+		}
+		cpuLitDone_[v] = 1;
+		reader.Goto(v);
+		float pos[3];
+		reader.ReadPosNonThrough(pos);
+		Vec4f unlitColor;
+		if (reader.hasColor0()) {
+			reader.ReadColor0(unlitColor.AsArray());
+		} else {
+			unlitColor = materialAmbientRGBA;
+		}
+		Vec3f worldnormal(0, 0, 1);
+		if (reader.hasNormal()) {
+			Vec3f normal;
+			reader.ReadNrm(normal.AsArray());
+			if (gstate.areNormalsReversed()) {
+				normal = -normal;
+			}
+			Norm3ByMatrix43(worldnormal.AsArray(), normal.AsArray(), gstate.worldMatrix);
+			worldnormal = worldnormal.NormalizedOr001(cpu_info.bSSE4_1);
+		}
+		float worldpos[3];
+		Vec3ByMatrix43(worldpos, pos, gstate.worldMatrix);
+
+		Vec4f c0, c1;
+		lighter->Light(c0.AsArray(), c1.AsArray(), unlitColor.AsArray(), Vec3f(worldpos[0], worldpos[1], worldpos[2]), worldnormal);
+		if (!lmode) {
+			c0 = Vec4f(c0.r() + c1.r(), c0.g() + c1.g(), c0.b() + c1.b(), c0.a());
+		}
+		cpuLitColors_[v * 2] = c0.ToRGBA();
+		cpuLitColors_[v * 2 + 1] = lmode ? (c1.ToRGBA() & 0x00FFFFFF) : 0;
+	};
+
+	auto makeVertex = [&](int in, int outside, float t) {
+		u8 *dst = verts + vertCount * stride;
+		const u8 *a = verts + in * stride;
+		const u8 *b = verts + outside * stride;
+		if (fmt.cpuLit) {
+			lightVertex(in);
+			lightVertex(outside);
+			if (cpuLitStream_.empty()) {
+				// The original vertices keep the shader's lighting.
+				cpuLitStream_.assign(origVerts * 8, 0);
+			}
+			_dbg_assert_(cpuLitStream_.size() == vertCount * 8);
+			cpuLitStream_.resize((vertCount + 1) * 8);
+			u8 *litDst = &cpuLitStream_[vertCount * 8];
+			LerpComponent(DEC_U8_4, litDst, (const u8 *)&cpuLitColors_[in * 2], (const u8 *)&cpuLitColors_[outside * 2], t);
+			LerpComponent(DEC_U8_4, litDst + 4, (const u8 *)&cpuLitColors_[in * 2 + 1], (const u8 *)&cpuLitColors_[outside * 2 + 1], t);
+			// Use them.
+			litDst[7] = 255;
+		}
+		LerpComponent(DEC_FLOAT_3, dst + fmt.posoff, a + fmt.posoff, b + fmt.posoff, t);
+		if (fmt.nrmfmt) LerpComponent(fmt.nrmfmt, dst + fmt.nrmoff, a + fmt.nrmoff, b + fmt.nrmoff, t);
+		if (fmt.uvfmt) LerpComponent(fmt.uvfmt, dst + fmt.uvoff, a + fmt.uvoff, b + fmt.uvoff, t);
+		if (fmt.c0fmt) LerpComponent(fmt.c0fmt, dst + fmt.c0off, a + fmt.c0off, b + fmt.c0off, t);
+		if (fmt.c1fmt) LerpComponent(fmt.c1fmt, dst + fmt.c1off, a + fmt.c1off, b + fmt.c1off, t);
+		if (fmt.w0fmt) LerpComponent(fmt.w0fmt, dst + fmt.w0off, a + fmt.w0off, b + fmt.w0off, t);
+		if (fmt.w1fmt) LerpComponent(fmt.w1fmt, dst + fmt.w1off, a + fmt.w1off, b + fmt.w1off, t);
+		return (u16)vertCount++;
+	};
+
+	// A triangle becomes at most two.
+	if ((int)clipInds_.size() < indexCount * 2) {
+		clipInds_.resize(indexCount * 2);
+	}
+	u16 *out = clipInds_.data();
+	int numOut = 0;
+	auto emit = [&](const u16 *tri) {
+		out[numOut++] = tri[0];
+		out[numOut++] = tri[1];
+		out[numOut++] = tri[2];
+	};
+	const u8 *vertClass = vertClass_.data();
+	for (int i = 0; i + 3 <= indexCount; i += 3) {
+		const u16 *tri = inds + i;
+		const u8 c0 = vertClass[tri[0]], c1 = vertClass[tri[1]], c2 = vertClass[tri[2]];
+		if (c0 & c1 & c2) {
+			// All behind the near plane, or all beyond the far one.
+			continue;
+		}
+		if (!((c0 | c1 | c2) & VERT_BEHIND_NEAR)) {
+			emit(tri);
+			continue;
+		}
+		const bool outside[3] = { (c0 & VERT_BEHIND_NEAR) != 0, (c1 & VERT_BEHIND_NEAR) != 0, (c2 & VERT_BEHIND_NEAR) != 0 };
+		const int numOutside = (int)outside[0] + (int)outside[1] + (int)outside[2];
+
+		// The two vertices clipping makes, each from an inside vertex to an outside one.
+		int from[2], to[2];
+		if (numOutside == 1) {
+			const int o = outside[0] ? 0 : (outside[1] ? 1 : 2);
+			const int p = reversed ? (o + 1) % 3 : (o + 2) % 3;
+			const int n = reversed ? (o + 2) % 3 : (o + 1) % 3;
+			from[0] = tri[p]; to[0] = tri[o];
+			from[1] = tri[n]; to[1] = tri[o];
+		} else {
+			const int in = !outside[0] ? 0 : (!outside[1] ? 1 : 2);
+			from[0] = tri[in]; to[0] = tri[(in + 1) % 3];
+			from[1] = tri[in]; to[1] = tri[(in + 2) % 3];
+		}
+		float t[2];
+		bool madeOutside[2];
+		for (int j = 0; j < 2; j++) {
+			t[j] = NearPlaneT(&clipPos_[from[j] * 4], &clipPos_[to[j] * 4]);
+			madeOutside[j] = rangeCulling && NearPointOutsideRange(&clipPos_[from[j] * 4], &clipPos_[to[j] * 4], t[j]);
+		}
+
+		if (!canClip || vertCount + 2 > maxVerts) {
+			// Leave the clipping to the GPU, culling only if every part would be culled: b is in both halves.
+			if (!(numOutside == 1 ? madeOutside[1] : (madeOutside[0] || madeOutside[1]))) {
+				emit(tri);
+			}
+			continue;
+		}
+
+		if (numOutside == 2) {
+			if (madeOutside[0] || madeOutside[1]) {
+				continue;
+			}
+			const u16 a = makeVertex(from[0], to[0], t[0]);
+			const u16 b = makeVertex(from[1], to[1], t[1]);
+			const u16 sub[3] = { (u16)from[0], a, b };
+			emit(sub);
+			continue;
+		}
+
+		if (madeOutside[1]) {
+			continue;
+		}
+		const u16 p = (u16)from[0], n = (u16)from[1];
+		const u16 a = madeOutside[0] ? 0 : makeVertex(from[0], to[0], t[0]);
+		const u16 b = makeVertex(from[1], to[1], t[1]);
+		// Keep the winding we were given.
+		const int first = reversed ? 2 : 1, second = reversed ? 1 : 2;
+		if (!madeOutside[0]) {
+			u16 sub[3];
+			sub[0] = p; sub[first] = a; sub[second] = b;
+			emit(sub);
+		}
+		u16 sub[3];
+		sub[0] = p; sub[first] = b; sub[second] = n;
+		emit(sub);
+	}
+
+	numOut = std::min(numOut, maxInds - maxInds % 3);
+	memcpy(inds, out, numOut * sizeof(u16));
+	*numVerts = vertCount;
+	return numOut;
+}
+
 
 
 // Takes a list of consecutive PRIM opcodes, and extends the current draw call to include them.
 // This is just a performance optimization. NOTE: This isn't compatible with really accurate culling,
 // unless we refactor things a bit.
-int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle, ClipInfoFlags clipInfoFlags) {
+int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle, ClipInfoFlags clipInfoFlags, int maxVerts) {
 	if (clipInfoFlags & ClipInfoFlags::Valid) {
 		clipInfoFlags_ |= clipInfoFlags;
 	}
@@ -759,9 +1304,15 @@ int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *
 		if (IsTrianglePrim(newPrim) != isTriangle)
 			break;
 		int vertexCount = data & 0xFFFF;
-		if (numDrawInds >= MAX_DEFERRED_DRAW_INDS || vertexCountInDrawCalls_ + offset + vertexCount > VERTEX_BUFFER_MAX) {
+		const int expanded = ExpandedVertexCount(newPrim, vertexCount);
+		if (numDrawInds >= MAX_DEFERRED_DRAW_INDS || vertexCountInDrawCalls_ + offset + vertexCount > VERTEX_BUFFER_MAX || numVertsToDecode_ + (offset - dv.vertexCount) + vertexCount > VERTEX_BUFFER_MAX || expandedVertsInDrawCalls_ + expanded > VERTEX_BUFFER_MAX) {
 			break;
 		}
+		// The vertices would run off the end of memory. Execute_Prim drops the draw.
+		if ((int)(offset - dv.vertexCount) + vertexCount > maxVerts) {
+			break;
+		}
+		expandedVertsInDrawCalls_ += expanded;
 		DeferredInds &di = drawInds_[numDrawInds++];
 		di.indexType = 0;
 		di.prim = newPrim;
@@ -780,6 +1331,7 @@ int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *
 	dv.vertexCount = offset;
 	dv.indexUpperBound = dv.vertexCount - 1;
 	vertexCountInDrawCalls_ += totalCount;
+	numVertsToDecode_ += totalCount;
 	*bytesRead = totalCount * dec->VertexSize();
 	return cmd - start;
 }
@@ -805,7 +1357,42 @@ void DrawEngineCommon::SkipPrim(GEPrimitiveType prim, int vertexCount, const Ver
 
 // vertTypeID is the vertex type but with the UVGen mode smashed into the top bits.
 bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, ClipInfoFlags clipInfoFlags) {
-	if (!indexGen.PrimCompatible(prevPrim_, prim) || numDrawVerts_ >= MAX_DEFERRED_DRAW_VERTS || numDrawInds_ >= MAX_DEFERRED_DRAW_INDS || vertexCountInDrawCalls_ + vertexCount > VERTEX_BUFFER_MAX) {
+	const GEPrimitiveType realPrim = prim != GE_PRIM_KEEP_PREVIOUS ? prim : (prevPrim_ == GE_PRIM_INVALID ? GE_PRIM_POINTS : prevPrim_);
+	const int expanded = ExpandedVertexCount(realPrim, vertexCount);
+	if (expanded > VERTEX_BUFFER_MAX) {
+		// Software transform can't expand this many in one draw, so submit it in parts. Points, lines
+		// and rectangles are independent of each other; consecutive parts of a line strip share a vertex.
+		const bool strip = realPrim == GE_PRIM_LINE_STRIP;
+		const int partSize = (realPrim == GE_PRIM_POINTS || strip) ? VERTEX_BUFFER_MAX / 4 : VERTEX_BUFFER_MAX / 2;
+		static const int indexSizes[4] = { 0, 1, 2, 4 };
+		const int indexSize = indexSizes[(vertTypeID & GE_VTYPE_IDX_MASK) >> GE_VTYPE_IDX_SHIFT];
+		bool any = false;
+		for (int start = 0; start < vertexCount - (strip ? 1 : 0); start += partSize) {
+			const int count = std::min(partSize + (strip ? 1 : 0), vertexCount - start);
+			const void *partVerts = inds ? verts : (const void *)((const u8 *)verts + start * dec->VertexSize());
+			const void *partInds = inds ? (const void *)((const u8 *)inds + start * indexSize) : nullptr;
+			int partBytesRead = 0;
+			any = SubmitPrim(partVerts, partInds, realPrim, count, dec, vertTypeID, clockwise, &partBytesRead, clipInfoFlags) || any;
+		}
+		*bytesRead = vertexCount * dec->VertexSize();
+		return any;
+	}
+
+	// The index count doesn't bound how many vertices DecodeVerts will produce (the index range can be
+	// sparse), so track that separately, as the growth of the range to decode.
+	u16 lowerBound = 0;
+	u16 upperBound = 0;
+	int decodeGrowth = 0;
+	if (vertexCount > 0) {
+		GetIndexBounds(inds, vertexCount, vertTypeID, &lowerBound, &upperBound);
+		decodeGrowth = upperBound - lowerBound + 1;
+		if (CanExtendDecode(verts, inds, dec)) {
+			const DeferredVerts &last = drawVerts_[numDrawVerts_ - 1];
+			decodeGrowth = std::max(upperBound, last.indexUpperBound) - std::min(lowerBound, last.indexLowerBound) - (last.indexUpperBound - last.indexLowerBound);
+		}
+	}
+
+	if (!indexGen.PrimCompatible(prevPrim_, prim) || numDrawVerts_ >= MAX_DEFERRED_DRAW_VERTS || numDrawInds_ >= MAX_DEFERRED_DRAW_INDS || vertexCountInDrawCalls_ + vertexCount > VERTEX_BUFFER_MAX || numVertsToDecode_ + decodeGrowth > VERTEX_BUFFER_MAX || expandedVertsInDrawCalls_ + expanded > VERTEX_BUFFER_MAX) {
 		Flush();
 	}
 
@@ -855,6 +1442,7 @@ bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimiti
 		const int rem = vertexCount % 3;
 		if (rem != 0) {
 			vertexCount -= rem;
+			GetIndexBounds(inds, vertexCount, vertTypeID, &lowerBound, &upperBound);
 		}
 	}
 
@@ -881,17 +1469,16 @@ bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimiti
 
 	_dbg_assert_(numDrawVerts <= MAX_DEFERRED_DRAW_VERTS);
 
-	if (inds && numDrawVerts > decodeVertsCounter_ && drawVerts_[numDrawVerts - 1].verts == verts && !applySkin) {
+	if (CanExtendDecode(verts, inds, dec_)) {
 		// Same vertex pointer as a previous un-decoded draw call - let's just extend the decode!
 		di.vertDecodeIndex = numDrawVerts - 1;
-		u16 lb;
-		u16 ub;
-		GetIndexBounds(inds, vertexCount, vertTypeID, &lb, &ub);
 		DeferredVerts &dv = drawVerts_[numDrawVerts - 1];
-		if (lb < dv.indexLowerBound)
-			dv.indexLowerBound = lb;
-		if (ub > dv.indexUpperBound)
-			dv.indexUpperBound = ub;
+		const int oldCount = dv.indexUpperBound - dv.indexLowerBound + 1;
+		if (lowerBound < dv.indexLowerBound)
+			dv.indexLowerBound = lowerBound;
+		if (upperBound > dv.indexUpperBound)
+			dv.indexUpperBound = upperBound;
+		numVertsToDecode_ += dv.indexUpperBound - dv.indexLowerBound + 1 - oldCount;
 	} else {
 		// Record a new draw, and a new index gen.
 		DeferredVerts &dv = drawVerts_[numDrawVerts];
@@ -899,11 +1486,14 @@ bool DrawEngineCommon::SubmitPrim(const void *verts, const void *inds, GEPrimiti
 		dv.verts = verts;
 		dv.vertexCount = vertexCount;
 		dv.uvScale = LoadUVScaleOffset(gstate);
-		// Does handle the unindexed case.
-		GetIndexBounds(inds, vertexCount, vertTypeID, &dv.indexLowerBound, &dv.indexUpperBound);
+		dv.indexLowerBound = lowerBound;
+		dv.indexUpperBound = upperBound;
+		dv.predecoded = false;
+		numVertsToDecode_ += upperBound - lowerBound + 1;
 	}
 
 	vertexCountInDrawCalls_ += vertexCount;
+	expandedVertsInDrawCalls_ += ExpandedVertexCount(prim, vertexCount);
 	seenPrims_ |= (1 << prim);
 
 	if (prim == GE_PRIM_RECTANGLES && (gstate.getTextureAddress(0) & 0x3FFFFFFF) == (gstate.getFrameBufAddress() & 0x3FFFFFFF)) {
@@ -930,14 +1520,24 @@ void DrawEngineCommon::DecodeVerts(const VertexDecoder *dec, u8 *dest) {
 		drawVertexOffsets_[i] = numDecodedVerts - indexLowerBound;
 		const int indexUpperBound = dv.indexUpperBound;
 		const int count = indexUpperBound - indexLowerBound + 1;
-		if (count + numDecodedVerts >= VERTEX_BUFFER_MAX) {
-			// Hit our limit! Stop decoding in this draw.
+		if (count + numDecodedVerts > VERTEX_BUFFER_MAX) {
+			// SubmitPrim flushes before this can happen.
+			_dbg_assert_(false);
 			break;
 		}
 
-		// Decode the verts (and at the same time apply morphing/skinning). Simple.
-		const u8 *startPos = (const u8 *)dv.verts + indexLowerBound * dec->VertexSize();
-		dec->DecodeVerts(dest + numDecodedVerts * stride, startPos, &dv.uvScale, count);
+		u8 *decodedPos = dest + numDecodedVerts * stride;
+		if (dv.predecoded) {
+			const u8 *startPos = (const u8 *)dv.verts + indexLowerBound * stride;
+			// SubmitCurve puts it in place in decoded_ when it can, but a backend may decode elsewhere.
+			if (startPos != decodedPos) {
+				memcpy(decodedPos, startPos, count * stride);
+			}
+		} else {
+			// Decode the verts (and at the same time apply morphing/skinning). Simple.
+			const u8 *startPos = (const u8 *)dv.verts + indexLowerBound * dec->VertexSize();
+			dec->DecodeVerts(decodedPos, startPos, &dv.uvScale, count);
+		}
 		numDecodedVerts += count;
 	}
 	numDecodedVerts_ = numDecodedVerts;
@@ -1013,20 +1613,15 @@ bool DrawEngineCommon::DescribeCodePtr(const u8 *ptr, std::string &name) const {
 
 enum {
 	DEPTH_TRANSFORMED_MAX_VERTS = VERTEX_BUFFER_MAX,
-	DEPTH_TRANSFORMED_BYTES = DEPTH_TRANSFORMED_MAX_VERTS * 4 * sizeof(float),
-	DEPTH_SCREENVERTS_COMPONENT_COUNT = VERTEX_BUFFER_MAX,
-	DEPTH_SCREENVERTS_COMPONENT_BYTES = DEPTH_SCREENVERTS_COMPONENT_COUNT * sizeof(int) + 384,
-	DEPTH_SCREENVERTS_TOTAL_BYTES = DEPTH_SCREENVERTS_COMPONENT_BYTES * 3,
 	DEPTH_INDEXBUFFER_MAX_INDICES = DEPTH_TRANSFORMED_MAX_VERTS * 3,
-	DEPTH_INDEXBUFFER_BYTES = DEPTH_INDEXBUFFER_MAX_INDICES * sizeof(uint16_t),
 };
 
 // We process vertices for depth rendering in several stages:
-// First, we transform and collect vertices into depthTransformed_ (4-vectors, xyzw).
+// First, we transform and collect vertices into a DepthBatch (4-vectors, xyzw).
 // Then, we group and cull the vertices into four-triangle groups, which are placed in
-// depthScreenVerts_, with x, y and z separated into different part of the array.
+// the worker's screen vertices, with x, y and z separated into different part of the array.
 // (Alternatively, if drawing rectangles, they're just added linearly).
-// After that, we send these groups out for SIMD setup and rasterization.
+// After that, the worker sends these groups out for SIMD setup and rasterization.
 void DrawEngineCommon::InitDepthRaster() {
 	switch ((DepthRasterMode)g_Config.iDepthRasterMode) {
 	case DepthRasterMode::DEFAULT:
@@ -1041,23 +1636,13 @@ void DrawEngineCommon::InitDepthRaster() {
 	}
 
 	if (useDepthRaster_) {
-		depthDraws_.reserve(256);
-		depthTransformed_ = (float *)AllocateMemoryPages(DEPTH_TRANSFORMED_BYTES, MEM_PROT_READ | MEM_PROT_WRITE);
-		depthScreenVerts_ = (int *)AllocateMemoryPages(DEPTH_SCREENVERTS_TOTAL_BYTES, MEM_PROT_READ | MEM_PROT_WRITE);
-		depthIndices_ = (uint16_t *)AllocateMemoryPages(DEPTH_INDEXBUFFER_BYTES, MEM_PROT_READ | MEM_PROT_WRITE);
+		depthWorker_ = new DepthRasterWorker(DEPTH_TRANSFORMED_MAX_VERTS, DEPTH_INDEXBUFFER_MAX_INDICES);
 	}
 }
 
 void DrawEngineCommon::ShutdownDepthRaster() {
-	if (depthTransformed_) {
-		FreeMemoryPages(depthTransformed_, DEPTH_TRANSFORMED_BYTES);
-	}
-	if (depthScreenVerts_) {
-		FreeMemoryPages(depthScreenVerts_, DEPTH_SCREENVERTS_TOTAL_BYTES);
-	}
-	if (depthIndices_) {
-		FreeMemoryPages(depthIndices_, DEPTH_INDEXBUFFER_BYTES);
-	}
+	delete depthWorker_;
+	depthWorker_ = nullptr;
 }
 
 Mat4F32 ComputeFinalProjMatrix() {
@@ -1078,7 +1663,7 @@ Mat4F32 ComputeFinalProjMatrix() {
 	return m;
 }
 
-// numDecoded is how many vertices this draw will write to depthTransformed_, which is not the
+// numDecoded is how many vertices this draw will write to the batch, which is not the
 // same thing as vertexCount (the number of indices) - an indexed draw can decode far more
 // vertices than it has indices, or far fewer.
 bool DrawEngineCommon::CalculateDepthDraw(DepthDraw *draw, GEPrimitiveType prim, int vertexCount, int numDecoded) {
@@ -1127,26 +1712,31 @@ bool DrawEngineCommon::CalculateDepthDraw(DepthDraw *draw, GEPrimitiveType prim,
 		_dbg_assert_(gstate.isDepthWriteEnabled());
 	}
 
-	if (depthVertexCount_ + numDecoded > DEPTH_TRANSFORMED_MAX_VERTS) {
-		// Can't add more. We need to flush.
+	if (numDecoded > DEPTH_TRANSFORMED_MAX_VERTS || vertexCount > DEPTH_INDEXBUFFER_MAX_INDICES) {
 		return false;
 	}
-	if (depthIndexCount_ + vertexCount > DEPTH_INDEXBUFFER_MAX_INDICES) {
-		return false;
+	const DepthBatch *batch = &depthWorker_->Current();
+	if (batch->vertexCount + numDecoded > DEPTH_TRANSFORMED_MAX_VERTS || batch->indexCount + vertexCount > DEPTH_INDEXBUFFER_MAX_INDICES) {
+		// Full, start on another.
+		depthWorker_->Submit();
+		batch = &depthWorker_->Current();
 	}
 
 	draw->depthAddr = gstate.getDepthBufRawAddress() | 0x04000000;
 	draw->depthStride = gstate.DepthBufStride();
-	draw->vertexOffset = depthVertexCount_;
-	draw->indexOffset = depthIndexCount_;
+	depthWorker_->Reserve(numDecoded, vertexCount);
+	draw->vertexOffset = batch->vertexCount;
+	draw->indexOffset = batch->indexCount;
 	draw->vertexCount = vertexCount;
 	draw->cullEnabled = gstate.isCullEnabled();
 	draw->cullMode = gstate.getCullMode();
 	draw->prim = prim;
 	draw->scissor.x1 = gstate.getScissorX1();
 	draw->scissor.y1 = gstate.getScissorY1();
-	draw->scissor.x2 = gstate.getScissorX2();
-	draw->scissor.y2 = gstate.getScissorY2();
+	// The drawing region clips too, like in SoftGPU. Resistance: Retribution's scissor ends at 480,272, one
+	// past its region, and depth written to row 272 lands on the textures placed after the depth buffer.
+	draw->scissor.x2 = std::min(gstate.getScissorX2(), gstate.getRegionX2());
+	draw->scissor.y2 = std::min(gstate.getScissorY2(), gstate.getRegionY2());
 	return true;
 }
 
@@ -1174,6 +1764,7 @@ void DrawEngineCommon::DepthRasterSubmitRaw(GEPrimitiveType prim, const VertexDe
 	if (!CalculateDepthDraw(&draw, prim, vertexCount, willDecode)) {
 		return;
 	}
+	DepthBatch &batch = depthWorker_->Current();
 
 	TimeCollector collectStat(&gpuStats.perFrame.msPrepareDepth, g_coreCollectDebugStats);
 
@@ -1187,27 +1778,17 @@ void DrawEngineCommon::DepthRasterSubmitRaw(GEPrimitiveType prim, const VertexDe
 			break;
 		}
 		// Decode the verts (and at the same time apply morphing/skinning). Simple.
-		DecodeAndTransformForDepthRaster(depthTransformed_ + (draw.vertexOffset + numDecoded) * 4, worldviewproj, dv.verts, dv.indexLowerBound, dv.indexUpperBound, dec, vertTypeID);
+		DecodeAndTransformForDepthRaster(batch.transformed + (draw.vertexOffset + numDecoded) * 4, worldviewproj, dv.verts, dv.indexLowerBound, dv.indexUpperBound, dec, vertTypeID);
 		numDecoded += dv.indexUpperBound - dv.indexLowerBound + 1;
 	}
 
 	// Copy indices.
-	memcpy(depthIndices_ + draw.indexOffset, decIndex_, sizeof(uint16_t) * vertexCount);
+	memcpy(batch.indices + draw.indexOffset, decIndex_, sizeof(uint16_t) * vertexCount);
 
-	// Commit
-	depthIndexCount_ += vertexCount;
-	depthVertexCount_ += numDecoded;
-
-	if (depthDraws_.empty()) {
-		rasterTimeStart_ = time_now_d();
-	}
-
-	depthDraws_.push_back(draw);
-
-	// FlushQueuedDepth();
+	CommitDepthDraw(draw, vertexCount, numDecoded);
 }
 
-void DrawEngineCommon::DepthRasterPredecoded(GEPrimitiveType prim, const void *inVerts, int numDecoded, const VertexDecoder *dec, int vertexCount) {
+void DrawEngineCommon::DepthRasterPredecoded(GEPrimitiveType prim, const void *inVerts, int numDecoded, const VertexDecoder *dec, int vertexCount, const DecVtxFormat *fmt) {
 	if (!gstate.isModeClear() && (!gstate.isDepthTestEnabled() || !gstate.isDepthWriteEnabled())) {
 		return;
 	}
@@ -1216,6 +1797,7 @@ void DrawEngineCommon::DepthRasterPredecoded(GEPrimitiveType prim, const void *i
 	if (!CalculateDepthDraw(&draw, prim, vertexCount, numDecoded)) {
 		return;
 	}
+	DepthBatch &batch = depthWorker_->Current();
 
 	TimeCollector collectStat(&gpuStats.perFrame.msPrepareDepth, g_coreCollectDebugStats);
 
@@ -1223,77 +1805,61 @@ void DrawEngineCommon::DepthRasterPredecoded(GEPrimitiveType prim, const void *i
 	_dbg_assert_(prim != GE_PRIM_TRIANGLE_STRIP && prim != GE_PRIM_TRIANGLE_FAN);
 
 	if (dec->throughmode) {
-		ConvertPredecodedThroughForDepthRaster(depthTransformed_ + 4 * draw.vertexOffset, decoded_, dec, numDecoded);
+		ConvertPredecodedThroughForDepthRaster(batch.transformed + 4 * draw.vertexOffset, decoded_, dec, numDecoded);
 	} else {
 		if (dec->VertexType() & (GE_VTYPE_WEIGHT_MASK | GE_VTYPE_MORPHCOUNT_MASK)) {
 			return;
 		}
 		float worldviewproj[16];
 		ComputeFinalProjMatrix().Store(worldviewproj);
-		TransformPredecodedForDepthRaster(depthTransformed_ + 4 * draw.vertexOffset, worldviewproj, decoded_, dec, numDecoded);
+		TransformPredecodedForDepthRaster(batch.transformed + 4 * draw.vertexOffset, worldviewproj, decoded_, fmt ? *fmt : dec->GetDecVtxFmt(), numDecoded);
 	}
 
 	// Copy indices.
-	memcpy(depthIndices_ + draw.indexOffset, decIndex_, sizeof(uint16_t) * vertexCount);
+	memcpy(batch.indices + draw.indexOffset, decIndex_, sizeof(uint16_t) * vertexCount);
 
-	// Commit
-	depthIndexCount_ += vertexCount;
-	depthVertexCount_ += numDecoded;
+	CommitDepthDraw(draw, vertexCount, numDecoded);
+}
 
-	depthDraws_.push_back(draw);
-
-	if (depthDraws_.empty()) {
-		rasterTimeStart_ = time_now_d();
+void DrawEngineCommon::CommitDepthDraw(const DepthDraw &draw, int vertexCount, int numDecoded) {
+	DepthBatch &batch = depthWorker_->Current();
+	if (batch.draws.empty()) {
+		batch.lowQ = g_Config.iDepthRasterMode == (int)DepthRasterMode::LOW_QUALITY;
+		if (rasterTimeStart_ == 0.0) {
+			rasterTimeStart_ = time_now_d();
+		}
 	}
-	// FlushQueuedDepth();
+	batch.indexCount += vertexCount;
+	batch.vertexCount += numDecoded;
+	batch.draws.push_back(draw);
+}
+
+void DrawEngineCommon::SubmitQueuedDepth() {
+	if (depthWorker_) {
+		depthWorker_->Submit();
+	}
 }
 
 void DrawEngineCommon::FlushQueuedDepth() {
+	if (!depthWorker_) {
+		return;
+	}
+	depthWorker_->Wait();
 	if (rasterTimeStart_ != 0.0) {
 		gpuStats.perFrame.msRasterTimeAvailable += time_now_d() - rasterTimeStart_;
 		rasterTimeStart_ = 0.0;
 	}
+	depthWorker_->TakeTimes(&gpuStats.perFrame.msCullDepth, &gpuStats.perFrame.msRasterizeDepth);
+}
 
-	const bool collectStats = g_coreCollectDebugStats;
-	const bool lowQ = g_Config.iDepthRasterMode == (int)DepthRasterMode::LOW_QUALITY;
-	for (const auto &draw : depthDraws_) {
-		int *tx = depthScreenVerts_;
-		int *ty = depthScreenVerts_ + DEPTH_SCREENVERTS_COMPONENT_COUNT;
-		float *tz = (float *)(depthScreenVerts_ + DEPTH_SCREENVERTS_COMPONENT_COUNT * 2);
-
-		int outVertCount = 0;
-
-		const float *vertices = depthTransformed_ + 4 * draw.vertexOffset;
-		const uint16_t *indices = depthIndices_ + draw.indexOffset;
-
-		DepthScissor tileScissor = draw.scissor.Tile(0, 1);
-
-		{
-			TimeCollector collectStat(&gpuStats.perFrame.msCullDepth, collectStats);
-			switch (draw.prim) {
-			case GE_PRIM_RECTANGLES:
-				outVertCount = DepthRasterClipIndexedRectangles(tx, ty, tz, vertices, indices, draw, tileScissor);
-				break;
-			case GE_PRIM_TRIANGLES:
-				outVertCount = DepthRasterClipIndexedTriangles(tx, ty, tz, vertices, indices, draw, tileScissor, DEPTH_SCREENVERTS_COMPONENT_COUNT);
-				break;
-			default:
-				_dbg_assert_(false);
-				break;
-			}
-		}
-		if (outVertCount > 0) {
-			TimeCollector collectStat(&gpuStats.perFrame.msRasterizeDepth, collectStats);
-			if (!Memory::IsValid4AlignedAddress(draw.depthAddr)) {
-				continue;
-			}
-			u16 *depthPtr = (uint16_t *)Memory::GetPointerWriteUnchecked(draw.depthAddr);
-			DepthRasterScreenVerts(depthPtr, draw.depthStride, tx, ty, tz, outVertCount, draw, tileScissor, lowQ);
-		}
+void DrawEngineCommon::WaitForSubmittedDepth() {
+	if (depthWorker_) {
+		depthWorker_->WaitForSubmitted();
 	}
+}
 
-	// Reset queue
-	depthIndexCount_ = 0;
-	depthVertexCount_ = 0;
-	depthDraws_.clear();
+void DrawEngineCommon::WaitForDepthWrites(u32 addr, u32 size) {
+	if (depthWorker_) {
+		depthWorker_->WaitIfWriting(addr, size);
+	}
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -97,10 +98,16 @@ public:
 		httpVersion_ = version;
 	}
 
+	// The most body ReadResponseEntity accepts, before and after decompression.
+	void SetMaxResponseSize(size_t size) {
+		maxResponseSize_ = size;
+	}
+
 protected:
 	std::string userAgent_;
 	const char* httpVersion_;
 	double headerTimeout_ = 900.0;
+	size_t maxResponseSize_ = MAX_RESPONSE_IN_MEMORY;
 };
 
 // Really an asynchronous request.
@@ -124,7 +131,9 @@ private:
 	std::string postData_;
 	std::thread thread_;
 	std::string postMime_;
-	bool completed_ = false;
+	// Set last on the download thread, after the result code and buffer. Atomic, so that once
+	// Done() sees it, those are visible too.
+	std::atomic<bool> completed_{false};
 	bool failed_ = false;
 	net::ResolveFunc customResolve_;
 };
