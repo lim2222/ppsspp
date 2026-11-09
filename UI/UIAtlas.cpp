@@ -207,6 +207,7 @@ static const ImageMeta g_uiImageIDs[] = {
 	{"I_ARCHIVE_RAR", false},
 	{"I_DOWNLOAD", false},
 	{"I_TATACON", false},
+	{"I_TATACON_GLOW", false},
 	{"I_NETWORK", false},
 	{"I_LANGUAGE", false},
 	{"I_VR", false},
@@ -408,6 +409,26 @@ static void GenerateRoundRectCorner(Image &img, float radius, float thickness, f
 	}
 }
 
+// White, premultiplied, with a radial alpha falloff that reaches zero at the edge. Stretched to
+// an ellipse by the caller, this gives the soft spreading hit effect.
+static void GenerateRadialGlow(Image &img, float dpiScale) {
+	const int size = (int)(128.0f * dpiScale);
+	img.resize(size, size);
+	img.scale = dpiScale;
+	const float center = size * 0.5f;
+	const float invRadius = 1.0f / center;
+	for (int y = 0; y < size; y++) {
+		const float dy = (y + 0.5f) - center;
+		for (int x = 0; x < size; x++) {
+			const float dx = (x + 0.5f) - center;
+			const float d = sqrtf(dx * dx + dy * dy) * invRadius;
+			const float alpha = std::clamp(1.0f - d, 0.0f, 1.0f);
+			const u32 a = (u32)(alpha * 255.0f + 0.5f);
+			img.set1(x, y, a * 0x01010101);
+		}
+	}
+}
+
 static bool GenerateUIAtlasImage(Atlas *atlas, float dpiScale, Image *dest, int maxTextureSize, const ImageMeta *imageIDs, size_t imageCount) {
 	Bucket bucket;
 
@@ -478,6 +499,8 @@ static bool GenerateUIAtlasImage(Atlas *atlas, float dpiScale, Image *dest, int 
 		} else if (equals(imageIDs[i].id, "I_EMPTY")) {
 			img.resize(64, 64);
 			img.fill(0);
+		} else if (equals(imageIDs[i].id, "I_TATACON_GLOW")) {
+			GenerateRadialGlow(img, dpiScale);
 		} else if (imageIDs[i].cornerRadius > 0.0f) {
 			GenerateRoundRectCorner(img, imageIDs[i].cornerRadius, imageIDs[i].cornerThickness, dpiScale);
 		} else {

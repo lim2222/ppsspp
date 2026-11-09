@@ -6,6 +6,7 @@
 #include "Common/Data/Color/RGBAUtil.h"
 #include "Common/System/System.h"
 #include "Common/System/Display.h"
+#include "Common/TimeUtil.h"
 #include "Common/UI/Context.h"
 #include "Common/UI/ScreenManager.h"
 #include "Core/Config.h"
@@ -69,19 +70,7 @@ void TataconControl::Draw(UIContext &dc) {
 	float drumCenterY = bounds_.centerY() - (visualH * 0.01f);
 	
 	float drumRadius = visualW * 0.18f;
-	float rimRadius  = visualW * 0.45f;
 
-	// Rim hit effect
-	if (rimPressed) {
-		float rimSize = rimRadius * 1.0f;
-		Bounds rimBounds(
-			drumCenterX - rimSize * 0.5f,
-			drumCenterY - rimSize * 0.5f,
-			rimSize, rimSize);
-		dc.Draw()->DrawImageStretch(ImageID("I_ROUND"), rimBounds,
-			colorAlpha(0xDFDEB8, std::min(opacity * 0.45f, 1.0f)));
-	}
-	
 	dc.Draw()->DrawImage(image_, bounds_.centerX(), drawY, scale, colorAlpha(0xFFFFFF, opacity), ALIGN_CENTER);
 
 	// Center hit effect
@@ -103,7 +92,7 @@ void TataconControl::Draw(UIContext &dc) {
 			drumCenterX - centerW * 0.5f + centerOffsetX,
 			drumCenterY - centerH * 0.5f,
 			centerW, centerH);
-		dc.Draw()->DrawImageStretch(ImageID("I_ROUND"), centerBounds,
+		dc.Draw()->DrawImageStretch(ImageID("I_TATACON_GLOW"), centerBounds,
 			colorAlpha(0x96ADFB, std::min(opacity * 1.45f, 1.0f)));
 	}
 }
@@ -131,7 +120,7 @@ bool TataconControl::Touch(const TouchInput &touch) {
 		}
 		const uint32_t mask = ZoneForTouch(touch.x, touch.y);
 		if (mask != 0) {
-			PressPointer(touch.id, mask);
+			PressPointer(touch.id, mask, time_now_d());
 			return true;
 		}
 	}
@@ -144,7 +133,7 @@ bool TataconControl::Touch(const TouchInput &touch) {
 				if (mask != 0) {
 					// Also re-check usedPointerMask on MOVE.
 					if (!(IsPointerUsed(touch.id))) {
-						PressPointer(touch.id, mask);
+						PressPointer(touch.id, mask, time_now_d());
 					}
 				}
 			}
@@ -159,14 +148,40 @@ bool TataconControl::Touch(const TouchInput &touch) {
 	return false;
 }
 
-void TataconControl::PressPointer(int pointerId, uint32_t mask) {
+void TataconControl::PressPointer(int pointerId, uint32_t mask, double time) {
 	const uint32_t alreadyDown = ActiveMaskExcept(pointerId);
 	pointerDownMask_ |= 1 << pointerId;
 	pointerButtons_[pointerId] = mask;
 	if (g_Config.bHapticFeedback) {
-		System_Vibrate(HAPTIC_VIRTUAL_KEY);
+		// A big note is two fingers landing at practically the same time on opposite sides of
+		// the same kind of region (head with head, rim with rim), after a moment of silence.
+		// It gets a longer, heavier pulse than a single hit.
+		constexpr double BIG_HIT_PAIR_WINDOW = 0.025;
+		constexpr double BIG_HIT_QUIET_BEFORE = 0.110;
+		const double delta = time - lastHitTime_;
+		const bool bigPair = lastHitMask_ != 0 &&
+			delta >= 0.0 && delta <= BIG_HIT_PAIR_WINDOW &&
+			IsLeftSide(lastHitMask_) != IsLeftSide(mask) &&
+			IsHead(lastHitMask_) == IsHead(mask) &&
+			!lastPairWasBig_ &&
+			lastHitTime_ - prevHitTime_ >= BIG_HIT_QUIET_BEFORE;
+
+		prevHitTime_ = lastHitTime_;
+		lastHitTime_ = time;
+		lastHitMask_ = mask;
+		lastPairWasBig_ = bigPair;
+
+		System_Vibrate(bigPair ? HAPTIC_BIG_HIT : HAPTIC_VIRTUAL_KEY);
 	}
 	__CtrlUpdateButtons(mask & ~alreadyDown, 0);
+}
+
+bool TataconControl::IsLeftSide(uint32_t mask) {
+	return mask == CTRL_UP || mask == CTRL_DOWN || mask == CTRL_LTRIGGER;
+}
+
+bool TataconControl::IsHead(uint32_t mask) {
+	return mask == CTRL_UP || mask == CTRL_DOWN || mask == CTRL_CIRCLE || mask == CTRL_CROSS;
 }
 
 void TataconControl::ReleasePointer(int pointerId) {

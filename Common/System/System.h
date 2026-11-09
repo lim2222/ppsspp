@@ -42,6 +42,8 @@ enum {
 	HAPTIC_SOFT_KEYBOARD = -1,
 	HAPTIC_VIRTUAL_KEY = -2,
 	HAPTIC_LONG_PRESS_ACTIVATED = -3,
+	// Both sides of the taiko drum were hit at once, which should feel heavier than one hit.
+	HAPTIC_BIG_HIT = -4,
 };
 
 enum class LaunchUrlType {

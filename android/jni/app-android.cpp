@@ -317,14 +317,29 @@ void System_ShowKeyboard() {
 
 void System_Vibrate(int length_ms) {
     char temp[32];
-    
+    static uint64_t last_vibrate_time = 0;
+
+    // Get current timestamp in milliseconds using standard C++11 chrono
+    uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    // Two fingers hit opposite sides of the drum at once. Bypasses the debounce on purpose and
+    // replaces the first hit's pulse with a longer, heavier one.
+    if (length_ms == HAPTIC_BIG_HIT) {
+        last_vibrate_time = now;
+        int duration = 130;
+        int amplitude = 255;
+        switch (g_Config.iHapticStrength) {
+            case 1: duration = 90; amplitude = 180; break;
+            case 2: duration = 110; amplitude = 220; break;
+            case 3: duration = 130; amplitude = 255; break;
+        }
+        snprintf(temp, sizeof(temp), "%d,%d", duration, amplitude);
+        PushCommand("vibrate", temp);
+        return;
+    }
+
     if (length_ms == HAPTIC_VIRTUAL_KEY) {
-        static uint64_t last_vibrate_time = 0;
-        
-        // Get current timestamp in milliseconds using standard C++11 chrono
-        uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-            
         uint64_t delta = now - last_vibrate_time;
 
         // CRITICAL FIX FOR BIG DON (DUAL-HAND HITS):
