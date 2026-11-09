@@ -3055,7 +3055,7 @@ u32 sceKernelLoadModule(MIPSState *mips, const char *name, u32 flags, u32 option
 			ERROR_LOG_REPORT(Log::Loader, "sceKernelLoadModule(%s): invalid position (fixed)", name);
 			return hleDelayResult(SCE_KERNEL_ERROR_MEMBLOCK_ALLOC_FAILED, "module loaded", 500);
 		}
-		WARN_LOG_REPORT(Log::Loader, "sceKernelLoadModule: unsupported options size=%08x, flags=%08x, pos=%d, access=%d, data=%d, text=%d", lmoption->size, lmoption->flags, lmoption->position, lmoption->access, lmoption->mpiddata, lmoption->mpidtext);
+		WARN_LOG(Log::Loader, "sceKernelLoadModule: unsupported options size=%08x, flags=%08x, pos=%d, access=%d, data=%d, text=%d", lmoption->size, lmoption->flags, lmoption->position, lmoption->access, lmoption->mpiddata, lmoption->mpidtext);
 	}
 
 	// Opening and reading the file, then about 1ms plus 30us per KB of loader work, the caller waiting
@@ -3138,6 +3138,11 @@ static const u32 SM_OPTION_ATTR_MASK = 0x00F06000;
 
 // What sceKernelStartModule, sceKernelStopModule and the self-stop calls check in their option
 // before anything else.
+// Loaded modules have no status of their own here (it stays 0), so anything before STARTING is one.
+static bool IsModuleLoadedNotStarted(const PSPModule *module) {
+	return module->nm.status < MODULE_STATUS_STARTING;
+}
+
 static int ValidateSMOption(const SceKernelSMOption *option) {
 	if ((u32)(sceKernelGetCompiledSdkVersion() & 0xFFFF0000) > 0x0207FFFF && option->size != sizeof(SceKernelSMOption)) {
 		return SCE_KERNEL_ERROR_ILLEGAL_SIZE;
@@ -3312,6 +3317,10 @@ int __KernelStartModule(SceUID moduleId, u32 argsize, u32 argAddr, u32 returnVal
 	} else if (entryAddr == 0 || entryAddr == (u32)-1) {
 		INFO_LOG(Log::sceModule, "__KernelStartModule(%d,asize=%08x,aptr=%08x,retptr=%08x): no entry address", moduleId, argsize, argAddr, returnValueAddr);
 		module->nm.status = MODULE_STATUS_STARTED;
+		// The status is still set to 0 (modules/nostart). R-Type Tactics gives up on its fonts otherwise.
+		if (returnValueAddr) {
+			Memory::WriteOrException_U32(0, returnValueAddr);
+		}
 	} else {
 		ERROR_LOG(Log::sceModule, "__KernelStartModule(%d,asize=%08x,aptr=%08x,retptr=%08x): invalid entry address", moduleId, argsize, argAddr, returnValueAddr);
 		return -1;
@@ -3336,10 +3345,9 @@ u32 sceKernelStartModule(u32 moduleId, u32 argsize, u32 argAddr, u32 returnValue
 		if (returnValueAddr)
 			Memory::WriteOrException_U32(0, returnValueAddr);
 		return hleLogInfo(Log::sceModule, moduleId, "Faked module");
-	} else if (module->nm.status == MODULE_STATUS_STARTED) {
-		// TODO: Maybe should be SCE_KERNEL_ERROR_ALREADY_STARTED, but I get SCE_KERNEL_ERROR_ERROR.
-		// But I also get crashes...
-		return hleLogError(Log::sceModule, SCE_KERNEL_ERROR_ERROR);
+	} else if (!IsModuleLoadedNotStarted(module)) {
+		// Only a module that was never started can be, not a started or a stopped one (modules/startresult).
+		return hleLogError(Log::sceModule, SCE_KERNEL_ERROR_ERROR, "module status %d", module->nm.status);
 	} else {
 		bool needsWait;
 		int ret = __KernelStartModule(moduleId, argsize, argAddr, returnValueAddr, smoption.PtrOrNull(), &needsWait);
@@ -3379,7 +3387,16 @@ static u32 sceKernelStopModule(u32 moduleId, u32 argSize, u32 argAddr, u32 retur
 		return hleLogInfo(Log::sceModule, 0, "faking");
 	}
 	if (module->nm.status != MODULE_STATUS_STARTED) {
-		return hleLogError(Log::sceModule, SCE_KERNEL_ERROR_ALREADY_STOPPED, "already stopped");
+		// modules/startresult.
+		u32 stopError = SCE_KERNEL_ERROR_ERROR;
+		if (IsModuleLoadedNotStarted(module)) {
+			stopError = SCE_KERNEL_ERROR_NOT_STARTED;
+		} else if (module->nm.status == MODULE_STATUS_STOPPED) {
+			stopError = SCE_KERNEL_ERROR_ALREADY_STOPPED;
+		} else if (module->nm.status == MODULE_STATUS_STOPPING) {
+			stopError = SCE_KERNEL_ERROR_ALREADY_STOPPING;
+		}
+		return hleLogError(Log::sceModule, stopError, "module status %d", module->nm.status);
 	}
 
 	u32 stopFunc = module->nm.module_stop_func;
@@ -3415,6 +3432,10 @@ static u32 sceKernelUnloadModule(u32 moduleId) {
 	PSPModule *module = kernelObjects.Get<PSPModule>(moduleId, error);
 	if (!module)
 		return hleDelayResult(hleLogError(Log::sceModule, error), "module unloaded", 150);
+	// A started module (or one starting or stopping) has to be stopped first (modules/startresult).
+	if (!module->isFake && !IsModuleLoadedNotStarted(module) && module->nm.status != MODULE_STATUS_STOPPED) {
+		return hleLogError(Log::sceModule, SCE_KERNEL_ERROR_NOT_REMOVABLE, "module status %d", module->nm.status);
+	}
 
 	module->Cleanup();
 	kernelObjects.Destroy<PSPModule>(moduleId);
@@ -3434,7 +3455,7 @@ u32 __KernelStopUnloadSelfModuleWithOrWithoutStatus(u32 exitCode, u32 argSize, u
 
 	if (loadedModules.size() > 1) {
 		if (WithStatus) {
-			ERROR_LOG_REPORT(Log::sceModule, "UNIMPL sceKernelStopUnloadSelfModuleWithStatus(%08x, %08x, %08x, %08x, %08x): game may have crashed", exitCode, argSize, argp, statusAddr, optionAddr);
+			WARN_LOG(Log::sceModule, "sceKernelStopUnloadSelfModuleWithStatus(%08x, %08x, %08x, %08x, %08x)", exitCode, argSize, argp, statusAddr, optionAddr);
 		} else {
 			// NOTE: The previous "may have crashed" message is not accurate, Splinter Cell Essentials uses this normally when leaving/entering in-game.
 			// We should not report this.
@@ -3532,11 +3553,28 @@ void __KernelReturnFromModuleFunc(MIPSState *mips) {
 		return;
 	}
 
-	// We can't be starting and stopping at the same time, so no need to differentiate.
-	if (module->nm.status == MODULE_STATUS_STARTING)
-		module->nm.status = MODULE_STATUS_STARTED;
-	if (module->nm.status == MODULE_STATUS_STOPPING)
-		module->nm.status = MODULE_STATUS_STOPPED;
+	// What the start or stop call returns (modules/startresult). A nonzero module_start result
+	// gets rid of the module, and returns 0 for 1 (no resident) and the value itself otherwise.
+	// A nonzero module_stop result leaves the module started; 1 means it refused to stop.
+	u32 waitResult = 0;
+	bool deleteModule = false;
+	if (module->nm.status == MODULE_STATUS_STARTING) {
+		if (exitStatus == 0) {
+			module->nm.status = MODULE_STATUS_STARTED;
+			waitResult = leftModuleID;
+		} else {
+			module->nm.status = MODULE_STATUS_STOPPED;
+			waitResult = exitStatus == 1 ? 0 : exitStatus;
+			deleteModule = true;
+		}
+	} else if (module->nm.status == MODULE_STATUS_STOPPING) {
+		if (exitStatus == 0) {
+			module->nm.status = MODULE_STATUS_STOPPED;
+		} else {
+			module->nm.status = MODULE_STATUS_STARTED;
+			waitResult = exitStatus == 1 ? SCE_KERNEL_ERROR_CAN_NOT_STOP : exitStatus;
+		}
+	}
 	for (auto it = module->waitingThreads.begin(), end = module->waitingThreads.end(); it < end; ++it) {
 		// Still waiting?
 		if (HLEKernel::VerifyWait(it->threadID, WAITTYPE_MODULE, leftModuleID))
@@ -3547,7 +3585,7 @@ void __KernelReturnFromModuleFunc(MIPSState *mips) {
 			} else {
 				if (it->statusPtr != 0)
 					Memory::WriteOrException_U32(exitStatus, it->statusPtr);
-				__KernelResumeThreadFromWait(it->threadID, module->nm.status == MODULE_STATUS_STARTED ? leftModuleID : 0);
+				__KernelResumeThreadFromWait(it->threadID, waitResult);
 			}
 		}
 	}
@@ -3579,7 +3617,7 @@ void __KernelReturnFromModuleFunc(MIPSState *mips) {
 		}
 	}
 
-	if (module->nm.status == MODULE_STATUS_UNLOADING) {
+	if (module->nm.status == MODULE_STATUS_UNLOADING || deleteModule) {
 		// TODO: Delete the waiting thread?
 		module->Cleanup();
 		kernelObjects.Destroy<PSPModule>(leftModuleID);
@@ -3711,7 +3749,7 @@ static u32 sceKernelLoadModuleByID(u32 id, u32 flags, u32 lmoptionPtr) {
 	const SceKernelLMOption *lmoption = 0;
 	if (lmoptionPtr) {
 		lmoption = (const SceKernelLMOption *)Memory::GetPointerOrException(lmoptionPtr);
-		WARN_LOG_REPORT(Log::Loader, "sceKernelLoadModuleByID: unsupported options size=%08x, flags=%08x, pos=%d, access=%d, data=%d, text=%d", lmoption->size, lmoption->flags, lmoption->position, lmoption->access, lmoption->mpiddata, lmoption->mpidtext);
+		WARN_LOG(Log::Loader, "sceKernelLoadModuleByID: unsupported options size=%08x, flags=%08x, pos=%d, access=%d, data=%d, text=%d", lmoption->size, lmoption->flags, lmoption->position, lmoption->access, lmoption->mpiddata, lmoption->mpidtext);
 	}
 	u32 pos = (u32)pspFileSystem.SeekFile(handle, 0, FILEMOVE_CURRENT);
 	size_t size = pspFileSystem.SeekFile(handle, 0, FILEMOVE_END);
@@ -3828,7 +3866,7 @@ SceUID sceKernelLoadModuleBufferUsbWlan(u32 size, u32 bufPtr, u32 flags, u32 lmo
 	const SceKernelLMOption *lmoption = 0;
 	if (lmoptionPtr) {
 		lmoption = (const SceKernelLMOption *)Memory::GetPointerOrException(lmoptionPtr);
-		WARN_LOG_REPORT(Log::Loader, "sceKernelLoadModuleBufferUsbWlan: unsupported options size=%08x, flags=%08x, pos=%d, access=%d, data=%d, text=%d", lmoption->size, lmoption->flags, lmoption->position, lmoption->access, lmoption->mpiddata, lmoption->mpidtext);
+		WARN_LOG(Log::Loader, "sceKernelLoadModuleBufferUsbWlan: unsupported options size=%08x, flags=%08x, pos=%d, access=%d, data=%d, text=%d", lmoption->size, lmoption->flags, lmoption->position, lmoption->access, lmoption->mpiddata, lmoption->mpidtext);
 	}
 	std::string error_string;
 	PSPModule *module = nullptr;
@@ -3878,16 +3916,21 @@ SceUID sceKernelLoadModuleBufferUsbWlan(u32 size, u32 bufPtr, u32 flags, u32 lmo
 static u32 sceKernelQueryModuleInfo(u32 uid, u32 infoAddr)
 {
 	DEBUG_LOG(Log::sceModule, "sceKernelQueryModuleInfo(%i, %08x)", uid, infoAddr);
+	// The pointer is checked before the id, and once an SDK version past 2.07 is set, only the
+	// two struct sizes are accepted (modules/queryinfo).
+	if (!Memory::IsValidRange(infoAddr, 0x40)) {
+		return hleLogError(Log::sceModule, SCE_KERNEL_ERROR_ILLEGAL_ADDR, "bad infoAddr");
+	}
+	auto info = PSPPointer<ModuleInfo>::Create(infoAddr);
+	if ((u32)(sceKernelGetCompiledSdkVersion() & 0xFFFF0000) > 0x0207FFFF && info->size != 0x40 && info->size != 0x60) {
+		return hleLogError(Log::sceModule, SCE_KERNEL_ERROR_ILLEGAL_SIZE, "bad size %d", (int)info->size);
+	}
+
 	u32 error;
 	PSPModule *module = kernelObjects.Get<PSPModule>(uid, error);
 	if (!module) {
-		return error;
+		return hleLogError(Log::sceModule, error);
 	}
-	if (!Memory::IsValidAddress(infoAddr)) {
-		return hleLogError(Log::sceModule, -1, "bad infoAddr");
-	}
-
-	auto info = PSPPointer<ModuleInfo>::Create(infoAddr);
 
 	memcpy(info->segmentaddr, module->nm.segmentaddr, sizeof(info->segmentaddr));
 	memcpy(info->segmentsize, module->nm.segmentsize, sizeof(info->segmentsize));

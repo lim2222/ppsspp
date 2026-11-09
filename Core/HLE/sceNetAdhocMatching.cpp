@@ -1525,7 +1525,7 @@ int sceNetAdhocMatchingDelete(MIPSState *mips, int matchingId) {
 }
 
 int sceNetAdhocMatchingInit(MIPSState *mips, u32 memsize) {
-	WARN_LOG_REPORT_ONCE(sceNetAdhocMatchingInit, Log::sceNet, "sceNetAdhocMatchingInit(%d) at %08x", memsize, mips->pc);
+	INFO_LOG(Log::sceNet, "sceNetAdhocMatchingInit(%d) at %08x", memsize, mips->pc);
 
 	// Uninitialized Library
 	if (netAdhocMatchingInited)
@@ -1854,6 +1854,10 @@ static int sceNetAdhocMatchingSelectTarget(MIPSState *mips, int matchingId, cons
 
 	void * opt = NULL;
 	if (Memory::IsValidRange(optDataPtr, std::max(optLen, 1))) opt = Memory::GetPointerWriteUnchecked(optDataPtr);
+	// The messages copy optLen bytes from it.
+	if (optLen > 0 && opt == NULL) {
+		return hleLogError(Log::sceNet, SCE_NET_ADHOC_MATCHING_ERROR_INVALID_ARG, "adhocmatching bad opt buffer");
+	}
 	// Host Mode
 	if (context->mode == PSP_ADHOC_MATCHING_MODE_PARENT) {
 		// Already Connected. Right after accepting, it's still in progress (pspautotests net/adhoc/pair/matching).
@@ -2389,6 +2393,10 @@ int sceNetAdhocMatchingSendData(MIPSState *mips, int matchingId, const char *mac
 
 	void* data = NULL;
 	if (Memory::IsValidRange(dataAddr, dataLen)) data = Memory::GetPointerWriteUnchecked(dataAddr);
+	// The bulk packet copies all dataLen bytes from it.
+	if (data == NULL) {
+		return hleLogError(Log::sceNet, SCE_NET_ADHOC_MATCHING_ERROR_INVALID_ARG, "bad data buffer");
+	}
 
 	// Lock the peer
 	std::lock_guard<std::recursive_mutex> peer_guard(peerlock);
