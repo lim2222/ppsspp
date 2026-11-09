@@ -330,8 +330,8 @@ void System_Vibrate(int length_ms) {
         int duration = 130;
         int amplitude = 255;
         switch (g_Config.iHapticStrength) {
-            case 1: duration = 90; amplitude = 180; break;
-            case 2: duration = 110; amplitude = 220; break;
+            case 1: duration = 90; amplitude = 220; break;
+            case 2: duration = 110; amplitude = 255; break;
             case 3: duration = 130; amplitude = 255; break;
         }
         snprintf(temp, sizeof(temp), "%d,%d", duration, amplitude);
