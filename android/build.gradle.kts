@@ -130,7 +130,7 @@ android {
 		// Access the git version info via the extension
 		if (gitVersionName != "unknown") {
 			println("INFO: Overriding Android Version Name, Code: $gitVersionName $gitVersionCode")
-			versionName = "$gitVersionName+taiko v1.4"
+			versionName = "$gitVersionName+taiko v1.5"
 			versionCode = gitVersionCode
 		} else {
 			println("(not using these:) Android Version Name, Code: $gitVersionName $gitVersionCode")
