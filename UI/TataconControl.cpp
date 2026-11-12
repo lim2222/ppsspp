@@ -155,11 +155,10 @@ void TataconControl::PressPointer(int pointerId, uint32_t mask, double time) {
 	if (g_Config.bHapticFeedback) {
 		// A big note is two fingers landing close together on opposite sides of the same kind
 		// of region (head with head, rim with rim), after a moment of silence. It gets the
-		// heavy thud instead of a single pulse. The window has to cover how far apart two
-		// fingers of one tap land (a cheap panel can report them a few frames apart), but it
-		// must stay below QUIET_BEFORE or a steady alternating roll would read as a big note
-		// on every hit.
-		constexpr double BIG_HIT_PAIR_WINDOW = 0.080;
+		// heavy thud instead of a single pulse. The window covers how far apart two fingers of
+		// one tap land, but stays well under the "d, dd" spacing players actually hit, so a
+		// quick pair of single notes is not heard as a big note.
+		constexpr double BIG_HIT_PAIR_WINDOW = 0.050;
 		constexpr double BIG_HIT_QUIET_BEFORE = 0.110;
 		const double delta = time - lastHitTime_;
 		const bool bigPair = lastHitMask_ != 0 &&
