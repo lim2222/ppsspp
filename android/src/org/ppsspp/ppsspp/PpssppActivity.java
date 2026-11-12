@@ -1902,19 +1902,24 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 		} else if (command.equals("vibrate")) {
 			int milliseconds = -1;
 			int amplitude = -1;
+			boolean thud = false;
 			if (!params.isEmpty()) {
 				try {
-					if (params.contains(",")) {
-                            String[] parts = params.split(",");
-                            milliseconds = Integer.parseInt(parts[0]);
-                            amplitude = Integer.parseInt(parts[1]);
-                    } else {
-                            milliseconds = Integer.parseInt(params);
-                    }
-                } catch (NumberFormatException e) {
-                        Log.i(TAG,"bad vibrate param " + params);
-                }
-        }
+					if (params.startsWith("thud,")) {
+						// Taiko big note: the Java side renders the whole envelope, amplitude is 1..255.
+						thud = true;
+						amplitude = Integer.parseInt(params.substring(5));
+					} else if (params.contains(",")) {
+						String[] parts = params.split(",");
+						milliseconds = Integer.parseInt(parts[0]);
+						amplitude = Integer.parseInt(parts[1]);
+					} else {
+						milliseconds = Integer.parseInt(params);
+					}
+				} catch (NumberFormatException e) {
+					Log.i(TAG, "bad vibrate param " + params);
+				}
+			}
 			// Special parameters to perform standard haptic feedback
 			// operations
 			// -1 = Standard keyboard press feedback
@@ -1924,6 +1929,10 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			// permission.
 			if (surfView != null) {
 				try {
+					if (thud) {
+						vibrateTataconBigHit(amplitude);
+						return true;
+					}
 					switch (milliseconds) {
 						case -1:
 							surfView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP, HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
@@ -2135,6 +2144,55 @@ public class PpssppActivity extends AppCompatActivity implements SensorEventList
 			Log.w(TAG, "Unknown string command " + command);
 			return false;
 		}
+	}
+
+	// Taiko "big note": two fingers on opposite sides of the drum get a heavy thud with a
+	// fading aftershock instead of a single flat pulse. The envelope is Eden's rumble
+	// shaper, as used by Vita3K-Plus: a hard attack, a sustained mid section and a tail,
+	// so the motor keeps humming for a moment after the hit.
+	private static final long[] TATACON_BIG_HIT_THUD_TIMINGS_MS = {35L, 150L, 75L};
+	private static final float[] TATACON_BIG_HIT_THUD_SCALES = {1.0f, 0.6f, 0.3f};
+
+	// Whether the vibrator supports PRIMITIVE_THUD (Android 12+, needs a good motor).
+	// Probed once, like Eden's lazy thudSupported.
+	private Boolean thudPrimitiveSupported = null;
+
+	private void vibrateTataconBigHit(int strength) {
+		android.os.Vibrator vibrator = (android.os.Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+		if (vibrator == null || !vibrator.hasVibrator()) {
+			return;
+		}
+		final int amp = Math.max(1, Math.min(255, strength));
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+			// No amplitude control before Android 8; keep the attack/sustain/tail rhythm.
+			vibrator.vibrate(new long[] {0, 35, 30, 150, 50, 75}, -1);
+			return;
+		}
+		final float scale = amp / 255.0f;
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+			if (thudPrimitiveSupported == null) {
+				thudPrimitiveSupported = hasThudPrimitive(vibrator);
+			}
+			if (thudPrimitiveSupported) {
+				vibrator.vibrate(android.os.VibrationEffect.startComposition()
+					.addPrimitive(android.os.VibrationEffect.Composition.PRIMITIVE_THUD, scale)
+					.addPrimitive(android.os.VibrationEffect.Composition.PRIMITIVE_THUD, scale * 0.6f, 30)
+					.addPrimitive(android.os.VibrationEffect.Composition.PRIMITIVE_THUD, scale * 0.3f, 50)
+					.compose());
+				return;
+			}
+		}
+		// No thud primitive: the same envelope as a plain waveform.
+		final int[] amplitudes = new int[TATACON_BIG_HIT_THUD_SCALES.length];
+		for (int i = 0; i < amplitudes.length; i++) {
+			amplitudes[i] = Math.max(1, Math.round(amp * TATACON_BIG_HIT_THUD_SCALES[i]));
+		}
+		vibrator.vibrate(android.os.VibrationEffect.createWaveform(TATACON_BIG_HIT_THUD_TIMINGS_MS, amplitudes, -1));
+	}
+
+	private static boolean hasThudPrimitive(android.os.Vibrator vibrator) {
+		final boolean[] supported = vibrator.arePrimitivesSupported(android.os.VibrationEffect.Composition.PRIMITIVE_THUD);
+		return supported.length > 0 && supported[0];
 	}
 
 	// Offers a file to other apps through the share sheet. The receiver gets read access to this file only.

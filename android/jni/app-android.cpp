@@ -323,18 +323,17 @@ void System_Vibrate(int length_ms) {
     uint64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
 
-    // Two fingers hit opposite sides of the drum at once. Bypasses the debounce on purpose and
-    // replaces the first hit's pulse with a longer, heavier one.
+    // Two fingers hit opposite sides of the drum at once. Bypasses the debounce on purpose;
+    // the Java side replaces the first hit's pulse with a heavy thud and a fading aftershock.
     if (length_ms == HAPTIC_BIG_HIT) {
         last_vibrate_time = now;
-        int duration = 130;
         int amplitude = 255;
         switch (g_Config.iHapticStrength) {
-            case 1: duration = 90; amplitude = 220; break;
-            case 2: duration = 110; amplitude = 255; break;
-            case 3: duration = 130; amplitude = 255; break;
+            case 1: amplitude = 180; break;
+            case 2: amplitude = 220; break;
+            case 3: amplitude = 255; break;
         }
-        snprintf(temp, sizeof(temp), "%d,%d", duration, amplitude);
+        snprintf(temp, sizeof(temp), "thud,%d", amplitude);
         PushCommand("vibrate", temp);
         return;
     }
